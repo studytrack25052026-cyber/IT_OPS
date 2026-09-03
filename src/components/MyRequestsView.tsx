@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, ChangeRequest, RequestStatus } from '../types';
-import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass } from '../utils/slaAndRisk';
+import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass, getChaseStageInfo } from '../utils/slaAndRisk';
+import { formatDisplayDateTime, formatDisplayDate } from '../utils/timezone';
 import {
   Search,
   Filter,
@@ -17,7 +18,11 @@ import {
   Bookmark,
   ShieldAlert,
   Timer,
-  Zap
+  Zap,
+  PauseCircle,
+  BellRing,
+  MessageSquareReply,
+  HelpCircle,
 } from 'lucide-react';
 
 interface MyRequestsViewProps {
@@ -42,14 +47,17 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
 
   // Filter requests owned by user or relevant to user
   const userRequests = changeRequests.filter((cr) => {
-    const matchesOwner = cr.requesterId === currentUser.id;
+    const matchesOwner =
+      Boolean(cr.requesterId && currentUser.id && cr.requesterId.toLowerCase() === currentUser.id.toLowerCase()) ||
+      Boolean(cr.requesterEmail && currentUser.email && cr.requesterEmail.trim().toLowerCase() === currentUser.email.trim().toLowerCase()) ||
+      Boolean(cr.requesterName && currentUser.fullName && cr.requesterName.trim().toLowerCase() === currentUser.fullName.trim().toLowerCase());
     const matchesSearch =
       cr.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
       cr.id.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesStatus =
       selectedStatusFilter === 'All' || cr.status === selectedStatusFilter;
     const matchesModule =
-      selectedModuleFilter === 'All' || cr.affectedModules.includes(selectedModuleFilter);
+      selectedModuleFilter === 'All' || (Array.isArray(cr.affectedModules) && cr.affectedModules.includes(selectedModuleFilter));
 
     const sla = calculateSlaStatus(cr);
     let matchesPreset = true;
@@ -101,8 +109,109 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
     'Completed',
   ];
 
+  // Outstanding requests waiting specifically for user's clarification
+  const pendingClarificationRequests = changeRequests.filter((cr) => {
+    const isOwner =
+      Boolean(cr.requesterId && currentUser.id && cr.requesterId.toLowerCase() === currentUser.id.toLowerCase()) ||
+      Boolean(cr.requesterEmail && currentUser.email && cr.requesterEmail.trim().toLowerCase() === currentUser.email.trim().toLowerCase()) ||
+      Boolean(cr.requesterName && currentUser.fullName && cr.requesterName.trim().toLowerCase() === currentUser.fullName.trim().toLowerCase());
+    return isOwner && cr.status === 'Returned to Requester';
+  });
+
   return (
     <div className="space-y-6">
+      {/* ⚠️ Prominent Action Required Banner for Requester */}
+      {pendingClarificationRequests.length > 0 && (
+        <div className="bg-amber-500/10 border-2 border-amber-400/80 rounded-2xl p-5 shadow-sm space-y-3.5 relative overflow-hidden">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center space-x-2.5">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+              </span>
+              <div className="flex items-center space-x-2">
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+                <h2 className="text-sm font-bold text-amber-950">
+                  Action Required: {pendingClarificationRequests.length} Request{pendingClarificationRequests.length > 1 ? 's' : ''} Awaiting Your Clarification
+                </h2>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="text-[11px] font-bold px-2.5 py-1 bg-amber-100 text-amber-900 border border-amber-300 rounded-lg flex items-center gap-1.5">
+                <PauseCircle className="w-3.5 h-3.5 text-amber-700" />
+                <span>SLA Clock Paused</span>
+              </span>
+            </div>
+          </div>
+
+          <p className="text-xs text-amber-900 leading-relaxed">
+            The IT Department / HOD has requested additional technical details or clarification. <strong>The resolution SLA timer is paused</strong> while waiting for your response. Please provide the requested information to resume progress:
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {pendingClarificationRequests.map((cr) => {
+              const sla = calculateSlaStatus(cr);
+              const chase = getChaseStageInfo(sla.chaseStage);
+              const latestReturn = (cr.approvalHistory || []).find(
+                (h) => h.toStatus === 'Returned to Requester' || h.decision === 'Returned for Clarification' || h.decision === 'Sent Back'
+              );
+
+              return (
+                <div
+                  key={cr.id}
+                  className="bg-white rounded-xl border border-amber-200/90 p-3.5 shadow-xs flex flex-col justify-between space-y-3 hover:border-amber-300 transition-all"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                          {cr.id}
+                        </span>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${chase.colorClass} flex items-center gap-1`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${chase.dotColor}`}></span>
+                          <span>{chase.shortBadge}</span>
+                        </span>
+                      </div>
+                      <span className="text-[11px] font-medium text-amber-900/80">
+                        Waiting: <strong>{sla.daysWaitingOnRequester ?? 0}d {((sla.hoursWaitingOnRequester ?? 0) % 24)}h</strong>
+                      </span>
+                    </div>
+
+                    <h3 className="text-xs font-bold text-slate-900 line-clamp-1">{cr.title}</h3>
+
+                    {latestReturn?.comments && (
+                      <div className="bg-amber-50/70 border border-amber-200/80 rounded-lg p-2 text-[11px] text-amber-950 font-medium line-clamp-2">
+                        <span className="font-bold text-amber-900">Requested by {latestReturn.actorName}: </span>
+                        "{latestReturn.comments}"
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-amber-100/80">
+                    <button
+                      type="button"
+                      onClick={() => onRequestClick(cr.id)}
+                      className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 transition-colors flex items-center space-x-1 cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>View Request</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onEditRequest(cr)}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 cursor-pointer"
+                    >
+                      <MessageSquareReply className="w-3.5 h-3.5" />
+                      <span>⚡ Provide Clarification</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Unified Filters & Search Toolbar */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3 text-xs">
         <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
@@ -195,9 +304,9 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
       {userRequests.length === 0 ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500 space-y-3">
           <FileText className="w-10 h-10 text-slate-300 mx-auto" />
-          <p className="font-semibold text-sm text-slate-800">No change requests found</p>
+          <p className="font-semibold text-sm text-slate-800">No IT Request Found</p>
           <p className="text-xs max-w-sm mx-auto text-slate-500">
-            You have not created any requests matching the current search criteria.
+            
           </p>
           <button
             onClick={onCreateNewRequest}
@@ -247,9 +356,26 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
 
                     <span className="text-xs text-slate-500 font-normal">• {cr.requestType}</span>
 
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${getSlaBadgeClass(sla.slaStatus)}`}>
-                      {sla.slaStatus === 'SLA Breached' ? 'OVERDUE' : sla.slaStatus === 'Nearing Breach' ? 'NEARING BREACH' : 'ON TRACK'}
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded border flex items-center gap-1 ${getSlaBadgeClass(sla.slaStatus)}`}>
+                      {sla.slaStatus === 'SLA Paused' ? (
+                        <>
+                          <PauseCircle className="w-3 h-3 text-amber-700" />
+                          <span>SLA PAUSED (Waiting on You)</span>
+                        </>
+                      ) : sla.slaStatus === 'SLA Breached' ? (
+                        'OVERDUE'
+                      ) : sla.slaStatus === 'Nearing Breach' ? (
+                        'NEARING BREACH'
+                      ) : (
+                        'ON TRACK'
+                      )}
                     </span>
+
+                    {sla.slaStatus === 'SLA Paused' && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${getChaseStageInfo(sla.chaseStage).colorClass}`}>
+                        {getChaseStageInfo(sla.chaseStage).shortBadge}
+                      </span>
+                    )}
 
                     {risk && (
                       <span className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${getRiskBadgeClass(risk.riskLevel)}`}>
@@ -369,7 +495,7 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
                       <p className="text-amber-900 text-[11px]">
                         {cr.returnedByRole === 'IT Admin' || cr.returnedByRole === 'Software Developer' || cr.itClarificationRequested
                           ? cr.assignedDeveloperName
-                            ? `Click "Edit" above to supply the requested technical details or attachments. As HOD approval was already granted, submitting your updates will return the ticket directly to assigned developer ${cr.assignedDeveloperName} (without requiring HOD approval again).`
+                            ? ``
                             : `Click "Edit" above to supply the requested technical details or attachments. As HOD approval was already granted, submitting your updates will return the ticket directly to IT Admin (without requiring HOD approval again).`
                           : 'Please review comments in Audit Details, update the necessary information, and resubmit for HOD approval.'}
                       </p>
@@ -429,7 +555,7 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
 
                 {/* Footer notes */}
                 <div className="text-xs text-slate-500 flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-100">
-                  <div>Submitted: {cr.createdAt}</div>
+                  <div>Submitted: <strong className="text-slate-700 font-medium">{formatDisplayDateTime(cr.createdAt)}</strong></div>
                   {cr.assignedDeveloperName && (
                     <div>
                       Assigned Developer:{' '}
@@ -439,7 +565,7 @@ export const MyRequestsView: React.FC<MyRequestsViewProps> = ({
                   {cr.targetCompletionDate && (
                     <div>
                       Target Date:{' '}
-                      <strong className="text-slate-800 font-semibold">{cr.targetCompletionDate}</strong>
+                      <strong className="text-slate-800 font-semibold">{formatDisplayDate(cr.targetCompletionDate)}</strong>
                     </div>
                   )}
                 </div>

@@ -14,23 +14,19 @@ import {
   ServiceMaster,
   ApplicationAssetMaster,
   IssueTypeMaster,
+  ApplicationModuleMaster,
+  ApplicationSubFunctionMaster,
+  ApplicationProcessMaster,
 } from '../types';
-import {
-  MASTER_CATEGORIES,
-  MASTER_SERVICES,
-  MASTER_APPLICATIONS_ASSETS,
-  MASTER_ISSUE_TYPES,
-  MASTER_APPLICATION_MODULES,
-  MASTER_APPLICATION_SUBFUNCTIONS,
-  MASTER_APPLICATION_PROCESSES,
-} from '../data/serviceCatalog';
 import { calculateRiskScore } from '../utils/slaAndRisk';
+import { getMalaysianTimestamp } from '../utils/timezone';
 import {
   FileText,
   Paperclip,
   Save,
   Send,
   AlertCircle,
+  AlertTriangle,
   X,
   CheckCircle2,
   Calendar,
@@ -66,6 +62,9 @@ interface ChangeRequestFormProps {
   services?: ServiceMaster[];
   applications?: ApplicationAssetMaster[];
   issueTypes?: IssueTypeMaster[];
+  modules?: ApplicationModuleMaster[];
+  subFunctions?: ApplicationSubFunctionMaster[];
+  processes?: ApplicationProcessMaster[];
 }
 
 export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
@@ -79,11 +78,26 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   services: propServices,
   applications: propApplications,
   issueTypes: propIssueTypes,
+  modules: propModules,
+  subFunctions: propSubFunctions,
+  processes: propProcesses,
 }) => {
-  const allCategories = propCategories && propCategories.length > 0 ? propCategories : MASTER_CATEGORIES;
-  const allServices = propServices && propServices.length > 0 ? propServices : MASTER_SERVICES;
-  const allApplications = propApplications && propApplications.length > 0 ? propApplications : MASTER_APPLICATIONS_ASSETS;
-  const allIssueTypes = propIssueTypes && propIssueTypes.length > 0 ? propIssueTypes : MASTER_ISSUE_TYPES;
+  // Dynamic Catalog Resolution
+  const getCached = <T,>(key: string): T[] => {
+    try {
+      const v = localStorage.getItem(key);
+      if (v) return JSON.parse(v);
+    } catch {}
+    return [];
+  };
+
+  const allCategories = propCategories && propCategories.length > 0 ? propCategories : getCached<CategoryMaster>('pcs_catalog_cats_v1');
+  const allServices = propServices && propServices.length > 0 ? propServices : getCached<ServiceMaster>('pcs_catalog_services_v1');
+  const allApplications = propApplications && propApplications.length > 0 ? propApplications : getCached<ApplicationAssetMaster>('pcs_catalog_apps_v1');
+  const allIssueTypes = propIssueTypes && propIssueTypes.length > 0 ? propIssueTypes : getCached<IssueTypeMaster>('pcs_catalog_issuetypes_v1');
+  const allModules = propModules && propModules.length > 0 ? propModules : getCached<ApplicationModuleMaster>('pcs_catalog_modules_v1');
+  const allSubFunctions = propSubFunctions && propSubFunctions.length > 0 ? propSubFunctions : getCached<ApplicationSubFunctionMaster>('pcs_catalog_subfunctions_v1');
+  const allProcesses = propProcesses && propProcesses.length > 0 ? propProcesses : getCached<ApplicationProcessMaster>('pcs_catalog_processes_v1');
 
   // Target Department HOD info
   const targetDept = (departments || []).find((d) => d.id === currentUser.departmentId);
@@ -99,15 +113,20 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allCategories.find((c) => c.name === initialData.category);
       if (match) return match.id;
     }
-    return allCategories[0]?.id || 'cat-biz-apps'; // Default: Business Applications
+    return allCategories[0]?.id || '';
   });
 
   const currentCategory = useMemo(() => {
-    return allCategories.find((c) => c.id === selectedCategoryId) || allCategories[0] || MASTER_CATEGORIES[0];
+    return (
+      allCategories.find((c) => c.id === selectedCategoryId) ||
+      allCategories[0] ||
+      null
+    );
   }, [allCategories, selectedCategoryId]);
 
   // Available Services for Selected Category
   const availableServices = useMemo(() => {
+    if (!selectedCategoryId) return [];
     return allServices.filter((s) => s.categoryId === selectedCategoryId && s.isActive);
   }, [allServices, selectedCategoryId]);
 
@@ -117,15 +136,15 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allServices.find((s) => s.name === initialData.subcategory);
       if (match) return match.id;
     }
-    return availableServices[0]?.id || 'srv-biz-prod'; // Default: Production System
+    return availableServices[0]?.id || '';
   });
 
   // Ensure selected service belongs to selected category
   useEffect(() => {
-    if (!availableServices.some((s) => s.id === selectedServiceId)) {
-      if (availableServices.length > 0) {
-        setSelectedServiceId(availableServices[0].id);
-      }
+    if (availableServices.length > 0 && !availableServices.some((s) => s.id === selectedServiceId)) {
+      setSelectedServiceId(availableServices[0].id);
+    } else if (availableServices.length === 0) {
+      setSelectedServiceId('');
     }
   }, [availableServices, selectedServiceId]);
 
@@ -133,10 +152,9 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
     return (
       availableServices.find((s) => s.id === selectedServiceId) ||
       availableServices[0] ||
-      allServices[0] ||
-      MASTER_SERVICES[0]
+      null
     );
-  }, [availableServices, selectedServiceId, allServices]);
+  }, [availableServices, selectedServiceId]);
 
   // Available Applications / IT Assets for Selected Service
   const availableApplicationsAssets = useMemo(() => {
@@ -154,14 +172,14 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       );
       if (match) return match.id;
     }
-    return availableApplicationsAssets[0]?.id || 'app-pcs-net'; // Default: PCS.NET
+    return availableApplicationsAssets[0]?.id || '';
   });
 
   useEffect(() => {
-    if (!availableApplicationsAssets.some((a) => a.id === selectedAppAssetId)) {
-      if (availableApplicationsAssets.length > 0) {
-        setSelectedAppAssetId(availableApplicationsAssets[0].id);
-      }
+    if (availableApplicationsAssets.length > 0 && !availableApplicationsAssets.some((a) => a.id === selectedAppAssetId)) {
+      setSelectedAppAssetId(availableApplicationsAssets[0].id);
+    } else if (availableApplicationsAssets.length === 0) {
+      setSelectedAppAssetId('');
     }
   }, [availableApplicationsAssets, selectedAppAssetId]);
 
@@ -169,10 +187,9 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
     return (
       availableApplicationsAssets.find((a) => a.id === selectedAppAssetId) ||
       availableApplicationsAssets[0] ||
-      allApplications[0] ||
-      MASTER_APPLICATIONS_ASSETS[0]
+      null
     );
-  }, [availableApplicationsAssets, selectedAppAssetId, allApplications]);
+  }, [availableApplicationsAssets, selectedAppAssetId]);
 
   // Issue Type Selection
   const [selectedIssueTypeId, setSelectedIssueTypeId] = useState<string>(() => {
@@ -181,45 +198,51 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allIssueTypes.find((i) => i.name === initialData.issueType);
       if (match) return match.id;
     }
-    return allIssueTypes[0]?.id || 'issue-incident';
+    return allIssueTypes[0]?.id || '';
   });
 
   const currentIssueType = useMemo(() => {
     return (
       allIssueTypes.find((i) => i.id === selectedIssueTypeId) ||
       allIssueTypes[0] ||
-      MASTER_ISSUE_TYPES[0]
+      null
     );
+  }, [allIssueTypes, selectedIssueTypeId]);
+
+  // Synchronize initial selections if data loads asynchronously
+  useEffect(() => {
+    if (!selectedCategoryId && allCategories.length > 0) {
+      setSelectedCategoryId(allCategories[0].id);
+    }
+  }, [allCategories, selectedCategoryId]);
+
+  useEffect(() => {
+    if (!selectedIssueTypeId && allIssueTypes.length > 0) {
+      setSelectedIssueTypeId(allIssueTypes[0].id);
+    }
   }, [allIssueTypes, selectedIssueTypeId]);
 
   // --------------------------------------------------------------------------
   // 2. SECTION 2 — APPLICATION AREA (CONDITIONAL & OPTIONAL)
   // --------------------------------------------------------------------------
-  // Determine if Application Area is applicable for the currently selected Application
   const isApplicationAreaAvailable = useMemo(() => {
     if (!currentAppAsset) return false;
     return (
-      currentAppAsset.hasApplicationArea ||
-      MASTER_APPLICATION_MODULES.some((m) => m.applicationId === currentAppAsset.id && m.isActive)
+      Boolean(currentAppAsset.hasApplicationArea) ||
+      allModules.some((m) => m.applicationId === currentAppAsset.id && m.isActive)
     );
-  }, [currentAppAsset]);
+  }, [currentAppAsset, allModules]);
 
-  // Modules available for current application
+  // Modules available for current application (relational parent-child filtering by applicationId)
   const availableAppModules = useMemo(() => {
     if (!isApplicationAreaAvailable || !currentAppAsset) return [];
-    const directModules = MASTER_APPLICATION_MODULES.filter(
+    return allModules.filter(
       (m) => m.applicationId === currentAppAsset.id && m.isActive
     );
-    // If specific modules exist, return them; otherwise fallback to general PCS.NET modules if it's a Tanaka system
-    if (directModules.length > 0) return directModules;
-    if (currentCategory?.id === 'cat-biz-apps') {
-      return MASTER_APPLICATION_MODULES.filter((m) => m.isActive);
-    }
-    return [];
-  }, [isApplicationAreaAvailable, currentAppAsset, currentCategory]);
+  }, [isApplicationAreaAvailable, currentAppAsset, allModules]);
 
   // Temporary selectors for adding an Application Area
-  const [activeModuleId, setActiveModuleId] = useState<string>('mod-pcs-107');
+  const [activeModuleId, setActiveModuleId] = useState<string>('');
   const [activeSubFunctionId, setActiveSubFunctionId] = useState<string>('');
   const [activeProcessId, setActiveProcessId] = useState<string>('');
 
@@ -239,34 +262,55 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   // Available Sub-Functions for Active Module
   const availableSubFunctions = useMemo(() => {
     if (!activeModuleId) return [];
-    return MASTER_APPLICATION_SUBFUNCTIONS.filter(
+    return allSubFunctions.filter(
       (sf) => sf.moduleId === activeModuleId && sf.isActive
     );
-  }, [activeModuleId]);
+  }, [activeModuleId, allSubFunctions]);
 
   // Available Processes for Active Sub-Function
   const availableProcesses = useMemo(() => {
     if (!activeSubFunctionId) return [];
-    return MASTER_APPLICATION_PROCESSES.filter(
+    return allProcesses.filter(
       (p) => p.subFunctionId === activeSubFunctionId && p.isActive
     );
-  }, [activeSubFunctionId]);
+  }, [activeSubFunctionId, allProcesses]);
 
-  // Tagged Application Areas on the Ticket (Supports multiple areas!)
+  // Tagged Application Areas on the Ticket (Defensively parses arrays & strings)
   const [applicationAreas, setApplicationAreas] = useState<ApplicationAreaSelection[]>(() => {
-    if (initialData?.applicationAreas && initialData.applicationAreas.length > 0) {
+    if (initialData?.applicationAreas && Array.isArray(initialData.applicationAreas) && initialData.applicationAreas.length > 0) {
       return initialData.applicationAreas;
     }
+    if (typeof initialData?.applicationAreas === 'string') {
+      try {
+        const parsed = JSON.parse(initialData.applicationAreas);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch { /* ignore */ }
+    }
     // Backward compatibility with affectedModules
-    if (initialData?.affectedModules && initialData.affectedModules.length > 0) {
+    if (initialData?.affectedModules && Array.isArray(initialData.affectedModules) && initialData.affectedModules.length > 0) {
       return initialData.affectedModules
-        .filter((mod) => mod.includes('_') || mod.includes('.'))
+        .filter((mod) => typeof mod === 'string' && (mod.includes('_') || mod.includes('.')))
         .map((modName, idx) => ({
           id: `area-migrated-${idx}`,
           moduleId: `mod-migrated-${idx}`,
           moduleCode: modName,
           moduleName: modName,
         }));
+    }
+    if (typeof initialData?.affectedModules === 'string') {
+      try {
+        const parsed = JSON.parse(initialData.affectedModules);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed
+            .filter((mod) => typeof mod === 'string' && (mod.includes('_') || mod.includes('.')))
+            .map((modName, idx) => ({
+              id: `area-migrated-${idx}`,
+              moduleId: `mod-migrated-${idx}`,
+              moduleCode: modName,
+              moduleName: modName,
+            }));
+        }
+      } catch { /* ignore */ }
     }
     return [];
   });
@@ -315,10 +359,12 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   // --------------------------------------------------------------------------
   const [title, setTitle] = useState(initialData?.title || '');
   const [priority, setPriority] = useState<PriorityLevel>(initialData?.priority || 'Medium');
-  const [requestedCompletionDate, setRequestedCompletionDate] = useState(
-    initialData?.requestedCompletionDate ||
-      new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-  );
+  const [requestedCompletionDate, setRequestedCompletionDate] = useState(() => {
+    if (initialData?.requestedCompletionDate) {
+      return String(initialData.requestedCompletionDate).split('T')[0];
+    }
+    return new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  });
   const [currentBehavior, setCurrentBehavior] = useState(
     initialData?.currentBehaviorDescription || ''
   );
@@ -328,7 +374,19 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   const [businessJustification, setBusinessJustification] = useState(
     initialData?.businessJustification || ''
   );
-  const [attachments, setAttachments] = useState<Attachment[]>(initialData?.attachments || []);
+  const [clarificationReply, setClarificationReply] = useState(
+    initialData?.clarificationReply || ''
+  );
+  const [attachments, setAttachments] = useState<Attachment[]>(() => {
+    if (Array.isArray(initialData?.attachments)) return initialData.attachments;
+    if (typeof initialData?.attachments === 'string') {
+      try {
+        const parsed = JSON.parse(initialData.attachments);
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* ignore */ }
+    }
+    return [];
+  });
   const [fileUploadError, setFileUploadError] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -338,7 +396,7 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
     priority,
     downtimeRequired: false,
     schemaChangeRequired: false,
-    requestType: currentIssueType.name,
+    requestType: (currentIssueType?.name as RequestType) || 'Incident',
   });
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -367,7 +425,7 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
         fileName: file.name,
         fileType: file.name.split('.').pop() || 'file',
         fileSizeKb: Math.round(file.size / 1024),
-        uploadedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        uploadedAt: getMalaysianTimestamp(),
         uploadedBy: currentUser.fullName,
         url: '#',
         storedPath: physicalStoredPath,
@@ -414,7 +472,10 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
         affectedModulesList.push(tag);
       });
     } else {
-      affectedModulesList.push(`${currentCategory.name} > ${currentService.name} > ${currentAppAsset.name}`);
+      const parts = [currentCategory?.name, currentService?.name, currentAppAsset?.name].filter(Boolean);
+      if (parts.length > 0) {
+        affectedModulesList.push(parts.join(' > '));
+      }
     }
 
     const payload: Partial<ChangeRequest> = {
@@ -427,20 +488,20 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       departmentName: currentUser.departmentName,
 
       // Unified Relational Classification fields
-      categoryId: currentCategory.id,
-      categoryName: currentCategory.name,
-      category: currentCategory.name,
-      serviceId: currentService.id,
-      serviceName: currentService.name,
-      subcategory: currentService.name,
-      applicationAssetId: currentAppAsset.id,
-      applicationAssetName: currentAppAsset.name,
-      applicationName: currentAppAsset.name,
-      assetTag: currentAppAsset.assetTag,
-      issueTypeId: currentIssueType.id,
-      issueTypeName: currentIssueType.name,
-      issueType: currentIssueType.name,
-      requestType: (currentIssueType.name as RequestType) || 'Incident',
+      categoryId: currentCategory?.id || selectedCategoryId,
+      categoryName: currentCategory?.name || '',
+      category: (currentCategory?.name as TicketCategory) || 'Business Applications',
+      serviceId: currentService?.id || selectedServiceId,
+      serviceName: currentService?.name || '',
+      subcategory: currentService?.name || '',
+      applicationAssetId: currentAppAsset?.id || selectedAppAssetId,
+      applicationAssetName: currentAppAsset?.name || '',
+      applicationName: currentAppAsset?.name || '',
+      assetTag: currentAppAsset?.assetTag,
+      issueTypeId: currentIssueType?.id || selectedIssueTypeId,
+      issueTypeName: currentIssueType?.name || '',
+      issueType: (currentIssueType?.name as TicketIssueType) || 'Incident',
+      requestType: (currentIssueType?.name as RequestType) || 'Incident',
 
       // Application Areas
       applicationAreas,
@@ -451,6 +512,7 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       currentBehaviorDescription: currentBehavior,
       requestedChangeDescription: requestedChange || currentBehavior,
       businessJustification: businessJustification || 'Standard IT operational request.',
+      clarificationReply: clarificationReply.trim() || undefined,
       attachments,
       requestedCompletionDate,
       riskAssessment: calculatedRisk,
@@ -470,6 +532,20 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   const isReturnedForClarification = !!(
     initialData?.status === 'Returned to Requester' || initialData?.itClarificationRequested
   );
+
+  const latestReturnHistory = useMemo(() => {
+    if (!initialData || !Array.isArray(initialData.approvalHistory)) return null;
+    return (
+      initialData.approvalHistory.find(
+        (h) =>
+          h &&
+          (h.toStatus === 'Returned to Requester' ||
+            h.decision === 'SendBack' ||
+            (typeof h.comments === 'string' && h.comments.includes('notes:')) ||
+            (typeof h.comments === 'string' && h.comments.toLowerCase().includes('clarification')))
+      ) || null
+    );
+  }, [initialData]);
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xl overflow-hidden max-w-4xl mx-auto">
@@ -507,6 +583,64 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       </div>
 
       <div className="p-6 space-y-6">
+        {/* Clarification Request Notice Banner */}
+        {isReturnedForClarification && (
+          <div className="bg-amber-50 border border-amber-300/80 rounded-2xl p-5 text-xs space-y-3 shadow-sm">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center space-x-2 text-amber-950 font-bold text-sm">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                <span>
+                  {latestReturnHistory?.actorName
+                    ? `Technical Clarification Requested by ${latestReturnHistory.actorName} (${latestReturnHistory.actorRole || initialData?.returnedByRole || 'IT Staff'})`
+                    : `Clarification Requested by ${initialData?.returnedByRole || 'IT Staff'}`}
+                </span>
+              </div>
+              {latestReturnHistory?.actionDate && (
+                <span className="text-[11px] text-amber-700 font-mono">
+                  Requested on {latestReturnHistory.actionDate}
+                </span>
+              )}
+            </div>
+
+            {latestReturnHistory?.comments && (
+              <div className="bg-white/95 p-3.5 rounded-xl border border-amber-200 text-amber-950">
+                <strong className="text-amber-950 block mb-1 text-[11px] uppercase tracking-wider">
+                  Questions / Clarifications Required:
+                </strong>
+                <p className="leading-relaxed whitespace-pre-wrap font-medium text-xs">
+                  {latestReturnHistory.comments}
+                </p>
+              </div>
+            )}
+
+            {/* Direct Reply Note Field */}
+            <div className="bg-white/95 p-3.5 rounded-xl border border-amber-200/90 space-y-1.5">
+              <label className="block text-xs font-bold text-amber-950">
+                Your Clarification Reply / Answer to IT / HOD
+              </label>
+              <textarea
+                rows={2}
+                value={clarificationReply}
+                onChange={(e) => setClarificationReply(e.target.value)}
+                placeholder="Explain the additional technical details, clarifications, or answer the questions above..."
+                className="w-full px-3 py-2 rounded-lg border border-amber-300 text-xs text-slate-900 bg-amber-50/20 focus:outline-none focus:ring-2 focus:ring-amber-400 font-medium"
+              />
+              <p className="text-[10.5px] text-amber-800">
+               
+              </p>
+            </div>
+
+            <p className="text-[11px] text-amber-800 leading-normal">
+              💡 <strong>Action:</strong> Review and update any descriptions, affected areas, or attach files below. Once you click "Submit", your response will{' '}
+              {isAlreadyHodApproved
+                ? initialData?.assignedDeveloperName
+                  ? `route directly back to assigned developer ${initialData.assignedDeveloperName} as "In Progress" (bypassing HOD re-approval).`
+                  : 'route directly back to IT Admin (bypassing HOD re-approval).'
+                : 'route back to Department HOD for approval.'}
+            </p>
+          </div>
+        )}
+
         {/* ================================================================== */}
         {/* SECTION 1 — CLASSIFICATION */}
         {/* ================================================================== */}
@@ -531,7 +665,7 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
                 onChange={(e) => setSelectedCategoryId(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-2xs cursor-pointer"
               >
-                {MASTER_CATEGORIES.filter((c) => c.isActive).map((cat) => (
+                {allCategories.filter((c) => c.isActive).map((cat) => (
                   <option key={cat.id} value={cat.id}>
                     {cat.name}
                   </option>
@@ -685,10 +819,16 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
             </div>
 
             {/* Add Application Area Button */}
-            <div className="flex items-center justify-between pt-1">
-              
-
-              
+            <div className="flex items-center justify-end pt-1">
+              <button
+                type="button"
+                onClick={handleAddApplicationArea}
+                disabled={!activeModuleId}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center space-x-1.5 cursor-pointer"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Application Area</span>
+              </button>
             </div>
 
             {/* Tagged Application Areas List */}
@@ -942,8 +1082,8 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
                 {priority === 'Critical'
                   ? 'Submit Critical Request (Bypass HOD)'
                   : isReturnedForClarification && isAlreadyHodApproved
-                  ? initialData?.assignedDeveloperName
-                    ? `Resubmit Directly to ${initialData.assignedDeveloperName.split(' ')[0]} (Dev)`
+                  ? (initialData?.assignedDeveloperName && typeof initialData.assignedDeveloperName === 'string' && initialData.assignedDeveloperName.trim())
+                    ? `Resubmit Directly to ${initialData.assignedDeveloperName.trim().split(' ')[0]} (Dev)`
                     : 'Resubmit Directly to IT Admin'
                   : isReturnedForClarification
                   ? 'Submit for HOD Approval'

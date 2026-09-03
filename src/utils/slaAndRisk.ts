@@ -1,11 +1,17 @@
 import { ChangeRequest, PriorityLevel } from '../types';
 
 export interface SlaInfo {
-  slaStatus: 'On Track' | 'Nearing Breach' | 'SLA Breached';
+  slaStatus: 'On Track' | 'Nearing Breach' | 'SLA Breached' | 'SLA Paused';
   hoursElapsed: number;
   hoursRemaining: number;
   targetHours: number;
   stageName: string;
+  isPaused?: boolean;
+  pausedReason?: string;
+  chaseStage?: 0 | 1 | 2 | 3;
+  daysWaitingOnRequester?: number;
+  hoursWaitingOnRequester?: number;
+  isAutoClosureEligible?: boolean;
 }
 
 export interface RiskInfo {
@@ -13,6 +19,150 @@ export interface RiskInfo {
   riskLevel: 'Low' | 'Medium' | 'High' | 'Severe';
   downtimeRequired: boolean;
   schemaChangeRequired: boolean;
+}
+
+/**
+ * Returns descriptive info, recommended action, and urgency for the 3-Stage Chase Policy.
+ */
+export function getChaseStageInfo(stage: number = 0) {
+  switch (stage) {
+    case 1:
+      return {
+        stage: 1,
+        title: 'Stage 1: Friendly Clarification Reminder',
+        shortBadge: 'Chase Stage 1 (Day 2+)',
+        colorClass: 'bg-blue-50 text-blue-700 border-blue-200',
+        dotColor: 'bg-blue-500',
+        description: 'Case has been waiting on requester details for 2+ days. Initial gentle reminder sent or due.',
+        suggestedAction: 'Send gentle reminder email & in-app prompt',
+      };
+    case 2:
+      return {
+        stage: 2,
+        title: 'Stage 2: Urgent Follow-Up Notice',
+        shortBadge: 'Chase Stage 2 (Day 4+)',
+        colorClass: 'bg-amber-50 text-amber-800 border-amber-300 font-semibold',
+        dotColor: 'bg-amber-500',
+        description: 'Case has been inactive for 4+ days. Work is blocked pending user specifications.',
+        suggestedAction: 'Send urgent follow-up notification to requester',
+      };
+    case 3:
+      return {
+        stage: 3,
+        title: 'Stage 3: Final 48-Hour Notice Before Auto-Close',
+        shortBadge: 'Stage 3: Final Notice (Day 7+)',
+        colorClass: 'bg-rose-50 text-rose-800 border-rose-300 font-bold',
+        dotColor: 'bg-rose-600',
+        description: 'Case has been inactive for 7+ days. Final 48h warning before auto-withdrawal.',
+        suggestedAction: 'Send final withdrawal warning / Auto-close eligible',
+      };
+    default:
+      return {
+        stage: 0,
+        title: 'Awaiting User Response',
+        shortBadge: 'Waiting on User',
+        colorClass: 'bg-slate-100 text-slate-700 border-slate-200',
+        dotColor: 'bg-slate-400',
+        description: 'Recently returned for technical details / clarification.',
+        suggestedAction: 'Awaiting requester reply',
+      };
+  }
+}
+
+/**
+ * Computes how many total hours a change request has spent in clarification states across its history.
+ */
+export function calculateTotalPausedClarificationHours(cr: ChangeRequest): number {
+  if (typeof cr.totalSlaPausedHours === 'number' && cr.totalSlaPausedHours > 0) {
+    return cr.totalSlaPausedHours;
+  }
+
+  if (!cr.approvalHistory || cr.approvalHistory.length === 0) {
+    return 0;
+  }
+
+  let totalMs = 0;
+  let pauseStart: number | null = null;
+
+  // Walk through history in chronological order
+  const sortedHistory = [...cr.approvalHistory].sort(
+    (a, b) => new Date(a.actionDate).getTime() - new Date(b.actionDate).getTime()
+  );
+
+  for (const entry of sortedHistory) {
+    const entryTime = new Date(entry.actionDate).getTime();
+    if (isNaN(entryTime)) continue;
+
+    if (entry.toStatus === 'Returned to Requester' || entry.decision === 'Returned for Clarification' || entry.decision === 'Sent Back') {
+      if (pauseStart === null) {
+        pauseStart = entryTime;
+      }
+    } else if (pauseStart !== null && (entry.fromStatus === 'Returned to Requester' || entry.decision === 'Submitted' || entry.decision === 'Resubmitted to IT')) {
+      totalMs += Math.max(0, entryTime - pauseStart);
+      pauseStart = null;
+    }
+  }
+
+  // If currently in Returned to Requester, add ongoing duration
+  if (pauseStart !== null && cr.status === 'Returned to Requester') {
+    const now = new Date().getTime();
+    totalMs += Math.max(0, now - pauseStart);
+  }
+
+  return Math.floor(totalMs / (1000 * 60 * 60));
+}
+
+/**
+ * Calculates how long the case has been continuously waiting on requester in the current clarification cycle.
+ */
+export function getCurrentClarificationDuration(cr: ChangeRequest): { hours: number; days: number; stage: 0 | 1 | 2 | 3 } {
+  if (cr.status !== 'Returned to Requester') {
+    return { hours: 0, days: 0, stage: 0 };
+  }
+
+  // Find the latest returned action date
+  let returnedTime: number | null = null;
+  if (cr.approvalHistory && cr.approvalHistory.length > 0) {
+    for (let i = cr.approvalHistory.length - 1; i >= 0; i--) {
+      const entry = cr.approvalHistory[i];
+      if (
+        entry.toStatus === 'Returned to Requester' ||
+        entry.decision === 'Returned for Clarification' ||
+        entry.decision === 'Sent Back'
+      ) {
+        const t = new Date(entry.actionDate).getTime();
+        if (!isNaN(t)) {
+          returnedTime = t;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!returnedTime) {
+    returnedTime = new Date(cr.updatedAt || cr.createdAt).getTime();
+  }
+
+  const now = new Date().getTime();
+  const diffMs = Math.max(0, now - (isNaN(returnedTime) ? now : returnedTime));
+  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+  const days = Math.floor(hours / 24);
+
+  // 3-Stage Chase Policy rule:
+  // Days < 2 -> Stage 0 (Recent)
+  // Days >= 2 & < 4 -> Stage 1 (Friendly reminder)
+  // Days >= 4 & < 7 -> Stage 2 (Urgent follow-up)
+  // Days >= 7 -> Stage 3 (Final 48h warning before auto-close)
+  let stage: 0 | 1 | 2 | 3 = 0;
+  if (days >= 7 || (cr.reminderCount && cr.reminderCount >= 3)) {
+    stage = 3;
+  } else if (days >= 4 || (cr.reminderCount && cr.reminderCount >= 2)) {
+    stage = 2;
+  } else if (days >= 2 || (cr.reminderCount && cr.reminderCount >= 1)) {
+    stage = 1;
+  }
+
+  return { hours, days, stage };
 }
 
 /**
@@ -75,6 +225,26 @@ export function calculateSlaStatus(cr: ChangeRequest): SlaInfo {
   // Target hours aligned with priority SLA
   const totalResolutionSla = cr.slaTargetHours || getPrioritySlaHours(cr.priority);
 
+  // 1. Check if Case is currently Waiting on Requester (SLA Clock Paused)
+  if (cr.status === 'Returned to Requester') {
+    const clarification = getCurrentClarificationDuration(cr);
+    const totalPaused = calculateTotalPausedClarificationHours(cr);
+
+    return {
+      slaStatus: 'SLA Paused',
+      hoursElapsed: totalPaused,
+      hoursRemaining: totalResolutionSla,
+      targetHours: totalResolutionSla,
+      stageName: 'Waiting on Requester',
+      isPaused: true,
+      pausedReason: 'SLA Clock Paused (Awaiting Requester Details)',
+      chaseStage: clarification.stage,
+      daysWaitingOnRequester: clarification.days,
+      hoursWaitingOnRequester: clarification.hours,
+      isAutoClosureEligible: clarification.days >= 7 || (cr.reminderCount ?? 0) >= 3,
+    };
+  }
+
   let targetHours = totalResolutionSla;
   let stageName = 'Resolution';
 
@@ -105,17 +275,21 @@ export function calculateSlaStatus(cr: ChangeRequest): SlaInfo {
   const createdTime = new Date(cr.createdAt).getTime();
   const now = new Date().getTime();
   
-  // Elapsed hours calculation (fallback if invalid date)
-  let hoursElapsed = Math.floor((now - (isNaN(createdTime) ? now : createdTime)) / (1000 * 60 * 60));
-  if (hoursElapsed < 0) hoursElapsed = 0;
+  // Gross elapsed hours calculation
+  let grossHoursElapsed = Math.floor((now - (isNaN(createdTime) ? now : createdTime)) / (1000 * 60 * 60));
+  if (grossHoursElapsed < 0) grossHoursElapsed = 0;
+
+  // Deduct historical paused clarification time so IT team is not penalized for time the requester spent replying
+  const pausedClarificationHours = calculateTotalPausedClarificationHours(cr);
+  let hoursElapsed = Math.max(0, grossHoursElapsed - pausedClarificationHours);
 
   // Modulate elapsed hours for mock simulation realism
-  if (cr.id === 'PCS-CR-2026-00003') hoursElapsed = 54; // Breached mock example
-  if (cr.id === 'PCS-CR-2026-00002') hoursElapsed = 20; // Nearing breach mock example
+  if (cr.id === 'IT OPS-CR-2026-00003') hoursElapsed = 54; // Breached mock example
+  if (cr.id === 'IT OPS-CR-2026-00002') hoursElapsed = 20; // Nearing breach mock example
 
   const hoursRemaining = targetHours - hoursElapsed;
 
-  let slaStatus: 'On Track' | 'Nearing Breach' | 'SLA Breached' = 'On Track';
+  let slaStatus: 'On Track' | 'Nearing Breach' | 'SLA Breached' | 'SLA Paused' = 'On Track';
   if (hoursRemaining <= 0) {
     slaStatus = 'SLA Breached';
   } else if (hoursRemaining <= Math.max(6, Math.round(targetHours * 0.25))) {
@@ -128,6 +302,7 @@ export function calculateSlaStatus(cr: ChangeRequest): SlaInfo {
     hoursRemaining: Math.max(0, hoursRemaining),
     targetHours,
     stageName,
+    isPaused: false,
   };
 }
 
@@ -173,8 +348,10 @@ export function calculateRiskScore(params: {
   };
 }
 
-export function getSlaBadgeClass(status: 'On Track' | 'Nearing Breach' | 'SLA Breached') {
+export function getSlaBadgeClass(status: 'On Track' | 'Nearing Breach' | 'SLA Breached' | 'SLA Paused') {
   switch (status) {
+    case 'SLA Paused':
+      return 'bg-amber-50 text-amber-900 border border-amber-300 font-bold';
     case 'SLA Breached':
       return 'bg-rose-50 text-rose-700 border border-rose-200 font-bold';
     case 'Nearing Breach':

@@ -24,6 +24,7 @@ import {
   ApplicationProcessMaster,
   TemporaryApproverDelegation,
   DelegationReason,
+  CustomRoleDefinition,
 } from './types';
 import {
   MASTER_CATEGORIES,
@@ -37,11 +38,10 @@ import {
 import {
   mockDepartments,
   mockUsers,
-  defaultModuleHierarchy,
-  ModuleHierarchyMap,
   defaultSmtpConfig,
   defaultStorageConfig,
-} from './data/mockData';
+  baselineCustomRoles,
+} from './data/db';
 import { Sidebar } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
 import { ChangeRequestForm } from './components/ChangeRequestForm';
@@ -52,28 +52,34 @@ import { DeveloperKanbanView } from './components/DeveloperKanbanView';
 import { ClosedCasesView } from './components/ClosedCasesView';
 import { RequestDetailModal } from './components/RequestDetailModal';
 import { AdminUserMgmtView } from './components/AdminUserMgmtView';
+import { EmailContextTemplateAdminView } from './components/EmailContextTemplateAdminView';
 import { ReportsView } from './components/ReportsView';
 import { HowToUseView } from './components/HowToUseView';
 import { LoginModal } from './components/LoginModal';
-import { SmtpConsoleModal } from './components/SmtpConsoleModal';
+import { NotificationCenterModal } from './components/NotificationCenterModal';
 import { ItDirectModifyPayload } from './components/ItDirectModifyModal';
 import {
   createWelcomeAccountEmail,
+  createNewUserRegisteredPendingAdminEmail,
   createStateTransitionEmail,
   createUserApprovedEmail,
   createUserDepartmentReassignedEmail,
+  createPasswordResetOtpEmail,
+  createPasswordChangedConfirmationEmail,
   createAdminEmergencyPasswordResetEmail,
   createTemporaryApproverAssignedEmail,
   createDelegationRevokedEmail,
   createItDirectModificationEmail,
 } from './utils/emailNotifier';
 import { getUserDelegationContext } from './utils/delegationUtils';
-import { getPrioritySlaHours } from './utils/slaAndRisk';
-import { generateVerificationOtp } from './utils/passwordPolicy';
-import { Mail, LogOut } from 'lucide-react';
+import { hasRolePermission } from './utils/rbac';
+import { getPrioritySlaHours, getChaseStageInfo, calculateTotalPausedClarificationHours } from './utils/slaAndRisk';
+import { generateVerificationOtp, generateCompliantPassword } from './utils/passwordPolicy';
+import { getMalaysianTimestamp } from './utils/timezone';
+import { Mail, LogOut, Bell } from 'lucide-react';
 
 export default function App() {
-  // Active User State (Stored in localStorage, defaults to IT Admin)
+  // Active User State (Stored in localStorage, defaults to null for unauthenticated initial login view)
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('pcs_current_user_v2');
@@ -81,17 +87,38 @@ export default function App() {
     } catch (err) {
       console.error('Failed to parse current user from storage:', err);
     }
-    return mockUsers[0]; // Baseline IT Admin (David Ng)
+    return null; // Require login upon first opening the app
   });
 
-  // Master State Collections (Production - empty default, hydrated from PostgreSQL)
-  const [changeRequests, setChangeRequests] = useState<ChangeRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('pcs_change_requests_prod');
-      if (saved) return JSON.parse(saved);
-    } catch { /* ignore */ }
-    return [];
-  });
+  // Helper to normalize legacy PCS-CR prefix to ITO-CR prefix and ensure safe array fields
+  const normalizeCr = (item: ChangeRequest): ChangeRequest => {
+    if (!item) return item;
+    const oldId = item.id;
+    const newId = oldId && oldId.startsWith('PCS-CR-') ? oldId.replace(/^PCS-CR-/, 'ITO-CR-') : (oldId || '');
+    const approvalHistory = Array.isArray(item.approvalHistory) ? item.approvalHistory : [];
+    const attachments = Array.isArray(item.attachments) ? item.attachments : [];
+    const affectedModules = Array.isArray(item.affectedModules) ? item.affectedModules : [];
+    const applicationAreas = Array.isArray(item.applicationAreas) ? item.applicationAreas : [];
+    const revisionHistory = Array.isArray(item.revisionHistory) ? item.revisionHistory : [];
+
+    return {
+      ...item,
+      id: newId,
+      approvalHistory: approvalHistory.map((h) => ({
+        ...h,
+        changeRequestId: (h.changeRequestId && typeof h.changeRequestId === 'string' && h.changeRequestId.startsWith('PCS-CR-'))
+          ? h.changeRequestId.replace(/^PCS-CR-/, 'ITO-CR-')
+          : (h.changeRequestId || newId),
+      })),
+      attachments,
+      affectedModules,
+      applicationAreas,
+      revisionHistory,
+    };
+  };
+
+  // Master State Collections (Production - hydrated strictly from PostgreSQL)
+  const [changeRequests, setChangeRequests] = useState<ChangeRequest[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [backendConnected, setBackendConnected] = useState<boolean>(false);
 
@@ -108,13 +135,11 @@ export default function App() {
       if (isMounted) setBackendConnected(false);
     });
 
-    // 1. Change Requests
+    // 1. Change Requests (Hydrated from PostgreSQL database as the single source of truth)
     api.getChangeRequests().then((res) => {
       if (isMounted && res.success && Array.isArray(res.data)) {
-        setChangeRequests(res.data);
-        try {
-          localStorage.setItem('pcs_change_requests_prod', JSON.stringify(res.data));
-        } catch { /* ignore */ }
+        const normalized = res.data.map(normalizeCr);
+        setChangeRequests(normalized);
       }
     }).catch(() => {});
 
@@ -146,8 +171,69 @@ export default function App() {
       }
     }).catch(() => {});
 
+    // 6. Custom Roles & Governance Matrix
+    api.getCustomRoles().then((res) => {
+      if (isMounted && res.success && Array.isArray(res.data) && res.data.length > 0) {
+        setCustomRoles(res.data);
+      }
+    }).catch(() => {});
+
+    // 7. Enterprise IT Service Catalog & 3-Tier Hierarchy (PostgreSQL Single Source of Truth)
+    api.getCatalog().then((res) => {
+      if (isMounted && res.success && res.data) {
+        if (Array.isArray(res.data.categories)) {
+          setCategories(res.data.categories);
+          try { localStorage.setItem('pcs_catalog_cats_v1', JSON.stringify(res.data.categories)); } catch {}
+        }
+        if (Array.isArray(res.data.services)) {
+          setServices(res.data.services);
+          try { localStorage.setItem('pcs_catalog_services_v1', JSON.stringify(res.data.services)); } catch {}
+        }
+        if (Array.isArray(res.data.applications)) {
+          setApplications(res.data.applications);
+          try { localStorage.setItem('pcs_catalog_apps_v1', JSON.stringify(res.data.applications)); } catch {}
+        }
+        if (Array.isArray(res.data.issueTypes)) {
+          setIssueTypes(res.data.issueTypes);
+          try { localStorage.setItem('pcs_catalog_issuetypes_v1', JSON.stringify(res.data.issueTypes)); } catch {}
+        }
+        if (Array.isArray(res.data.modules)) {
+          setModules(res.data.modules);
+          try { localStorage.setItem('pcs_catalog_modules_v1', JSON.stringify(res.data.modules)); } catch {}
+        }
+        if (Array.isArray(res.data.subFunctions)) {
+          setSubFunctions(res.data.subFunctions);
+          try { localStorage.setItem('pcs_catalog_subfunctions_v1', JSON.stringify(res.data.subFunctions)); } catch {}
+        }
+        if (Array.isArray(res.data.processes)) {
+          setProcesses(res.data.processes);
+          try { localStorage.setItem('pcs_catalog_processes_v1', JSON.stringify(res.data.processes)); } catch {}
+        }
+      }
+    }).catch((err) => console.warn('[Load Catalog Error]', err));
+
     return () => { isMounted = false; };
   }, []);
+
+  // Custom Roles & Automated Governance Matrix State (localStorage + PostgreSQL synced)
+  const [customRoles, setCustomRoles] = useState<CustomRoleDefinition[]>(() => {
+    try {
+      const saved = localStorage.getItem('pcs_custom_roles_v1');
+      if (saved) return JSON.parse(saved);
+    } catch (err) {
+      console.error('Failed to parse custom roles from storage:', err);
+    }
+    return baselineCustomRoles;
+  });
+
+  const handleUpdateCustomRoles = (updatedRoles: CustomRoleDefinition[]) => {
+    setCustomRoles(updatedRoles);
+    try {
+      localStorage.setItem('pcs_custom_roles_v1', JSON.stringify(updatedRoles));
+    } catch (err) {
+      console.error('Failed to save custom roles to storage:', err);
+    }
+  };
 
   // Temporary Approver Delegations Database State (localStorage backed + PostgreSQL synced)
   const [delegations, setDelegations] = useState<TemporaryApproverDelegation[]>(() => {
@@ -175,7 +261,7 @@ export default function App() {
     reason: DelegationReason;
     notes?: string;
   }) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     const newId = `DEL-2026-${String(delegations.length + 1).padStart(4, '0')}`;
     const newDelegation: TemporaryApproverDelegation = {
       id: newId,
@@ -238,7 +324,7 @@ export default function App() {
   };
 
   const handleRevokeDelegation = (delegationId: string, revocationReason: string) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     let targetDel: TemporaryApproverDelegation | undefined;
 
     const updated = delegations.map((d) => {
@@ -333,26 +419,6 @@ export default function App() {
     }
   };
 
-  // Dynamic 3-Tier Module Hierarchy State (Database backed via localStorage)
-  const [moduleHierarchyMap, setModuleHierarchyMap] = useState<ModuleHierarchyMap>(() => {
-    try {
-      const saved = localStorage.getItem('pcs_module_hierarchy_v2');
-      if (saved) return JSON.parse(saved);
-    } catch (err) {
-      console.error('Failed to parse module hierarchy from localStorage:', err);
-    }
-    return defaultModuleHierarchy;
-  });
-
-  const handleUpdateModuleHierarchy = (updatedMap: ModuleHierarchyMap) => {
-    setModuleHierarchyMap(updatedMap);
-    try {
-      localStorage.setItem('pcs_module_hierarchy_v2', JSON.stringify(updatedMap));
-    } catch (err) {
-      console.error('Failed to save module hierarchy to storage:', err);
-    }
-  };
-
   // SMTP Relay Configuration State (localStorage backed)
   const [smtpConfig, setSmtpConfig] = useState<SmtpConfig>(() => {
     try {
@@ -415,8 +481,20 @@ export default function App() {
       return updated;
     });
 
-    // Persist email notification to PostgreSQL database table email_notification_logs
-    api.logEmail(log).catch((err) => console.warn('[DB Email Log Notice]', err));
+    // Real live SMTP email dispatch across Tanaka Enterprise Relay (157.9.183.242) + PostgreSQL logging
+    api.sendLiveEmail({
+      recipientEmail: log.recipientEmail,
+      recipientName: log.recipientName,
+      subject: log.subject,
+      bodyHtml: log.bodyHtml,
+      triggerEvent: log.triggerEvent,
+      changeRequestId: log.changeRequestId,
+      smtpConfig,
+    }).then((res) => {
+      if (res && res.data) {
+        console.log('[Live SMTP Email Dispatched]', res.data);
+      }
+    }).catch((err) => console.warn('[Live SMTP Notice]', err));
   };
 
   // Service Catalog Collections State (localStorage backed)
@@ -437,6 +515,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save categories to storage:', err);
     }
+    api.saveCatalog({ categories: updated }).catch((err) => console.warn('[Save Categories DB]', err));
   };
 
   const [services, setServices] = useState<ServiceMaster[]>(() => {
@@ -456,6 +535,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save services to storage:', err);
     }
+    api.saveCatalog({ services: updated }).catch((err) => console.warn('[Save Services DB]', err));
   };
 
   const [applications, setApplications] = useState<ApplicationAssetMaster[]>(() => {
@@ -475,6 +555,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save applications to storage:', err);
     }
+    api.saveCatalog({ applications: updated }).catch((err) => console.warn('[Save Applications DB]', err));
   };
 
   const [issueTypes, setIssueTypes] = useState<IssueTypeMaster[]>(() => {
@@ -494,6 +575,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save issue types to storage:', err);
     }
+    api.saveCatalog({ issueTypes: updated }).catch((err) => console.warn('[Save Issue Types DB]', err));
   };
 
   const [modules, setModules] = useState<ApplicationModuleMaster[]>(() => {
@@ -513,6 +595,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save modules to storage:', err);
     }
+    api.saveCatalog({ modules: updated }).catch((err) => console.warn('[Save Modules DB]', err));
   };
 
   const [subFunctions, setSubFunctions] = useState<ApplicationSubFunctionMaster[]>(() => {
@@ -532,6 +615,7 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save subfunctions to storage:', err);
     }
+    api.saveCatalog({ subFunctions: updated }).catch((err) => console.warn('[Save SubFunctions DB]', err));
   };
 
   const [processes, setProcesses] = useState<ApplicationProcessMaster[]>(() => {
@@ -551,16 +635,31 @@ export default function App() {
     } catch (err) {
       console.error('Failed to save processes to storage:', err);
     }
+    api.saveCatalog({ processes: updated }).catch((err) => console.warn('[Save Processes DB]', err));
   };
 
   // Modal Dialog States
   const [showLoginModal, setShowLoginModal] = useState(false);
-  const [showSmtpConsoleModal, setShowSmtpConsoleModal] = useState(false);
+  const [showNotificationsModal, setShowNotificationsModal] = useState(false);
 
   // Detail Modal & Form State
   const [selectedCrForModal, setSelectedCrForModal] = useState<ChangeRequest | null>(null);
   const [editingCr, setEditingCr] = useState<ChangeRequest | null>(null);
   const [appNavTab, setAppNavTab] = useState<string>('dashboard');
+  const [adminInitialTab, setAdminInitialTab] = useState<'catalog' | 'workload' | 'hierarchy' | 'users' | 'departments' | 'storage' | 'postgres'>('catalog');
+
+  const handleOpenEmailAndSmtpHub = () => {
+    setAppNavTab('emails');
+  };
+
+  const handleClearEmailLogs = () => {
+    setEmailLogs([]);
+    try {
+      localStorage.removeItem('pcs_email_logs_v2');
+    } catch (e) {
+      console.warn('Failed to clear email logs from localStorage:', e);
+    }
+  };
 
   // Compute pending counts for badge numbers
   const pendingHodCount = currentUser
@@ -587,8 +686,23 @@ export default function App() {
     } catch (e) {
       console.error('Failed to save current user:', e);
     }
+
+    // Immediately re-sync change requests and users from PostgreSQL on login/switch
+    api.getChangeRequests().then((res) => {
+      if (res.success && Array.isArray(res.data)) {
+        const normalized = res.data.map(normalizeCr);
+        setChangeRequests(normalized);
+      }
+    }).catch(() => {});
+
+    api.getUsers().then((res) => {
+      if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+        setUsers(res.data);
+      }
+    }).catch(() => {});
+
     if (user.role === 'Department HOD') setAppNavTab('hod');
-    else if (user.role === 'IT Admin') setAppNavTab('itadmin');
+    else if (user.role === 'IT Admin' || user.role === 'IT Helpdesk') setAppNavTab('itadmin');
     else if (user.role === 'Software Developer') setAppNavTab('dev');
     else if (user.role === 'System Admin') setAppNavTab('admin');
     else setAppNavTab('dashboard');
@@ -605,16 +719,30 @@ export default function App() {
   };
 
   const handleRegisterUser = async (newUser: UserProfile): Promise<{ success: boolean; message?: string; user?: UserProfile }> => {
-    let savedUser = newUser;
+    const matchedDept = departments.find((d) => d.id === newUser.departmentId) || departments[0];
+    const userToRegister: UserProfile = {
+      ...newUser,
+      departmentId: matchedDept.id,
+      departmentName: matchedDept.name,
+      status: 'Pending IT Approval',
+      mustChangePassword: false,
+      registeredAt: getMalaysianTimestamp(),
+    };
+
+    let savedUser = userToRegister;
     let apiSuccess = false;
     let apiMessage = '';
 
     try {
-      const res = await api.registerUser(newUser);
+      const res = await api.registerUser(userToRegister);
       if (res.success && res.user) {
-        savedUser = res.user;
+        savedUser = {
+          ...userToRegister,
+          ...res.user,
+          departmentName: res.user.departmentName || matchedDept.name,
+        };
         apiSuccess = true;
-        apiMessage = res.message || 'Account successfully registered and saved in PostgreSQL database.';
+        apiMessage = res.message || 'Account successfully registered and saved in PostgreSQL database (Pending IT Approval).';
       } else {
         apiSuccess = false;
         apiMessage = res.message || 'Database write failed. Check PostgreSQL connection.';
@@ -630,23 +758,23 @@ export default function App() {
     const updatedUsers = [savedUser, ...users.filter((u) => u.id !== savedUser.id && u.email.toLowerCase() !== savedUser.email.toLowerCase())];
     handleUpdateUsers(updatedUsers);
 
-    // IT notification & Email
+    // IT notification & Email (Alert IT Admin ONLY - no credentials sent to user at this stage)
     const itNotif: NotificationItem = {
       id: `notif-${Date.now()}`,
       userId: 'user-it-admin',
       title: 'New Account Registration Pending Approval',
-      message: `New user registration submitted by ${savedUser.fullName} (${savedUser.email}, ${savedUser.departmentName}). Please review in Admin Console.`,
-      createdAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      message: `New user registration submitted by ${savedUser.fullName} (${savedUser.email}, ${savedUser.departmentName}). Review and approve in System Administration.`,
+      createdAt: getMalaysianTimestamp(),
       read: false,
     };
     setNotifications((prev) => [itNotif, ...prev]);
 
-    const welcomeEmail = createWelcomeAccountEmail(
+    const adminPendingAlert = createNewUserRegisteredPendingAdminEmail(
       savedUser,
-      savedUser.password || 'TanakaPass2026!',
+      'IT@tanaka.com.my',
       smtpConfig
     );
-    dispatchEmailLog(welcomeEmail);
+    dispatchEmailLog(adminPendingAlert);
 
     return { success: apiSuccess, message: apiMessage, user: savedUser };
   };
@@ -657,24 +785,37 @@ export default function App() {
       return { success: false, message: `No account found with email "${email}".` };
     }
     const code = generateVerificationOtp();
-    api.requestPasswordResetOtp(email).catch(() => {});
+
+    // 1. Dispatch official OTP verification email with Login button
+    const otpEmailLog = createPasswordResetOtpEmail(targetUser, code, smtpConfig);
+    dispatchEmailLog(otpEmailLog);
+
+    // 2. Persist OTP token to PostgreSQL with identical code
+    api.requestPasswordResetOtp(email, code).catch(() => {});
+
     return { success: true, message: `OTP code sent to ${email}`, otpCode: code, targetUser };
   };
 
   const handleCompletePasswordReset = (userId: string, newPassword: string) => {
+    const targetUser = users.find((u) => u.id === userId);
+
     api.completePasswordReset(userId, newPassword).catch(() => {});
     const updated = users.map((u) => (u.id === userId ? { ...u, password: newPassword, mustChangePassword: false } : u));
     handleUpdateUsers(updated);
+
+    // Dispatch security confirmation email
+    if (targetUser) {
+      const confirmEmail = createPasswordChangedConfirmationEmail(targetUser, 'Self-Reset', smtpConfig);
+      dispatchEmailLog(confirmEmail);
+    }
   };
 
-  const handleCreateOrUpdateRequest = (requestData: Partial<ChangeRequest>, isDraft: boolean) => {
+  const handleCreateOrUpdateRequest = async (requestData: Partial<ChangeRequest>, isDraft: boolean) => {
     const isEdit = !!requestData.id;
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
-    let updatedRequests: ChangeRequest[];
-    let targetCrId = requestData.id;
-
-    if (isEdit && targetCrId) {
+    if (isEdit && requestData.id) {
+      const targetCrId = requestData.id;
       const existingCr = changeRequests.find((cr) => cr.id === targetCrId);
       const isCritical = (requestData.priority === 'Critical') || (!requestData.priority && existingCr?.priority === 'Critical');
       const isAlreadyHodApproved = !!(
@@ -686,12 +827,6 @@ export default function App() {
       );
       const isAssignedToDev = !!(existingCr?.assignedDeveloperId);
 
-      // Workflow Rules:
-      // 1. If Critical priority: Skip HOD approval. If already assigned to dev -> 'In Progress'; otherwise -> 'Pending IT Admin Review'.
-      // 2. If already approved by HOD (or returned by IT Admin / Dev): NO HOD approval required again!
-      //    - If assigned to developer -> routes directly back to 'In Progress' for that developer!
-      //    - If not yet assigned -> routes directly back to 'Pending IT Admin Review'!
-      // 3. Only if returned by Department HOD before HOD approval does it go back to 'Pending HOD Approval'.
       const newStatus: RequestStatus = isDraft
         ? 'Draft'
         : isCritical || isAlreadyHodApproved
@@ -708,17 +843,21 @@ export default function App() {
           : 'Clarification Provided to IT Admin'
         : 'Submitted';
 
+      const clarificationText = requestData.clarificationReply
+        ? `Requester Response: "${requestData.clarificationReply}". `
+        : '';
+
       const auditComment = isDraft
         ? 'Saved changes as draft.'
         : isCritical
         ? isAssignedToDev
-          ? `Critical Priority Request: Bypassed HOD approval and returned directly to assigned developer ${existingCr?.assignedDeveloperName} for urgent resolution.`
-          : 'Critical Priority Request: Automatically bypassed Department HOD approval and routed directly to IT Admin for urgent triage (monitored in HOD dashboard).'
+          ? `${clarificationText}Critical Priority Request: Bypassed HOD approval and returned directly to assigned IT staff ${existingCr?.assignedDeveloperName}.`
+          : `${clarificationText}Critical Priority Request: Automatically bypassed Department HOD approval and routed directly to IT Admin`
         : isAlreadyHodApproved
         ? isAssignedToDev
-          ? `Technical clarification and specifications provided by Requester (${currentUser.fullName}). HOD approval is already on file; returned directly to assigned developer ${existingCr?.assignedDeveloperName} for active implementation.`
-          : `Clarification provided by Requester (${currentUser.fullName}). HOD approval is already on file; returned directly to IT Admin triage queue.`
-        : 'Resubmitted for Department HOD Approval.';
+          ? `${clarificationText}Clarification provided. Returned directly to assigned IT staff ${existingCr?.assignedDeveloperName}.`
+          : `${clarificationText}Clarification provided. Returned to IT Admin queue.`
+        : `${clarificationText}Resubmitted`;
 
       const newHistory: ApprovalHistoryEntry = {
         id: `hist-${Date.now()}`,
@@ -733,28 +872,12 @@ export default function App() {
         comments: auditComment,
       };
 
-      updatedRequests = changeRequests.map((cr) => {
-        if (cr.id === targetCrId) {
-          return {
-            ...cr,
-            ...requestData,
-            status: newStatus,
-            slaTargetHours: getPrioritySlaHours(requestData.priority || cr.priority),
-            hodApprovalSkipped: !isDraft && isCritical ? true : cr.hodApprovalSkipped,
-            hodSkipReason: !isDraft && isCritical ? 'Critical Priority Direct-Route to IT (Emergency)' : cr.hodSkipReason,
-            returnedByRole: undefined,
-            itClarificationRequested: false,
-            updatedAt: now,
-            approvalHistory: [newHistory, ...cr.approvalHistory],
-          } as ChangeRequest;
-        }
-        return cr;
-      });
+      const additionalPausedHours = existingCr?.slaPausedAt
+        ? Math.max(0, Math.round((new Date(now).getTime() - new Date(existingCr.slaPausedAt).getTime()) / (1000 * 60 * 60)))
+        : 0;
+      const newTotalPausedHours = (existingCr?.totalSlaPausedHours || 0) + additionalPausedHours;
 
-      setChangeRequests(updatedRequests);
-
-      // Persist update to PostgreSQL database
-      api.updateChangeRequest(targetCrId, {
+      const updatePayload = {
         ...requestData,
         status: newStatus,
         slaTargetHours: getPrioritySlaHours(requestData.priority || existingCr?.priority || 'Medium'),
@@ -762,8 +885,22 @@ export default function App() {
         hodSkipReason: !isDraft && isCritical ? 'Critical Priority Direct-Route to IT (Emergency)' : existingCr?.hodSkipReason,
         returnedByRole: null,
         itClarificationRequested: false,
+        slaPausedAt: null,
+        totalSlaPausedHours: newTotalPausedHours,
+        reminderCount: 0,
+        lastReminderSentAt: null,
+        lastReminderStage: null,
         newApprovalHistoryEntry: newHistory,
-      }).catch((err) => console.warn('[DB Update CR Notice]', err));
+      };
+
+      const res = await api.updateChangeRequest(targetCrId, updatePayload);
+      if (!res.success || !res.data) {
+        alert(`Failed to update change request in PostgreSQL database: ${res.message || 'Unknown database error'}`);
+        return;
+      }
+
+      const updatedRecord = normalizeCr(res.data);
+      setChangeRequests((prev) => prev.map((item) => (item.id === targetCrId ? updatedRecord : item)));
 
       if (!isDraft) {
         const targetDept = departments.find((d) => d.id === currentUser.departmentId) || departments[0];
@@ -771,13 +908,12 @@ export default function App() {
         const targetHodName = targetDept?.hodName || 'Loh Pui Ling (Ms. Astrid)';
 
         if (isCritical || isAlreadyHodApproved) {
-          // Direct Route to Assigned Developer or IT Admin (Bypassing HOD re-approval)
           const devUser = existingCr?.assignedDeveloperId ? users.find((u) => u.id === existingCr.assignedDeveloperId) : undefined;
           const devEmail = devUser?.email || 'alex.chen@company.com';
 
           const recipientEmails = isAssignedToDev
-            ? `${devEmail}; david.it@company.com; ${currentUser.email}; ${targetHodEmail}`
-            : `david.it@company.com; ${currentUser.email}; ${targetHodEmail}`;
+            ? `${devEmail}; TEMIT@tanaka.com.my; ${currentUser.email}; ${targetHodEmail}`
+            : `TEMIT@tanaka.com.my; ${currentUser.email}; ${targetHodEmail}`;
 
           const emailLog = createStateTransitionEmail({
             changeRequestId: targetCrId,
@@ -809,7 +945,7 @@ export default function App() {
               read: false,
               changeRequestId: targetCrId,
             };
-            setNotifications([devNotif, ...notifications]);
+            setNotifications((prev) => [devNotif, ...prev]);
           } else {
             const itNotif: NotificationItem = {
               id: `notif-${Date.now()}`,
@@ -820,21 +956,21 @@ export default function App() {
               read: false,
               changeRequestId: targetCrId,
             };
-            setNotifications([itNotif, ...notifications]);
+            setNotifications((prev) => [itNotif, ...prev]);
           }
         } else {
-          // Standard resubmission to HOD (when returned by HOD before approval)
-          const recipientEmails = `${targetHodEmail}; ${currentUser.email}`;
+          const recipientEmails = targetHodEmail;
 
           const emailLog = createStateTransitionEmail({
             changeRequestId: targetCrId,
             requestTitle: requestData.title || existingCr?.title || 'Untitled Request',
             recipientEmail: recipientEmails,
-            recipientName: `${targetHodName} (HOD) / ${currentUser.fullName}`,
+            recipientName: targetHodName,
             previousStatus: existingCr?.status || 'Returned to Requester',
             newStatus: 'Pending HOD Approval',
             actionTaken: 'Submitted for HOD Approval',
             actorName: currentUser.fullName,
+            actorRole: 'Requester',
             comments: 'Change Request revised and submitted for Department HOD authorization.',
             smtpConfig,
           });
@@ -851,15 +987,15 @@ export default function App() {
             changeRequestId: targetCrId,
           };
 
-          setNotifications([newNotif, ...notifications]);
+          setNotifications((prev) => [newNotif, ...prev]);
         }
       }
+
+      setEditingCr(null);
+      setAppNavTab('myrequests');
     } else {
-      const seqVal = changeRequests.length + 1;
-      targetCrId = `PCS-CR-2026-${String(seqVal).padStart(5, '0')}`;
-
+      // New change request creation
       const isCritical = requestData.priority === 'Critical';
-
       const newStatus: RequestStatus = isDraft
         ? 'Draft'
         : isCritical
@@ -880,7 +1016,7 @@ export default function App() {
 
       const initialHistory: ApprovalHistoryEntry = {
         id: `hist-${Date.now()}`,
-        changeRequestId: targetCrId,
+        changeRequestId: '',
         actorUserId: currentUser.id,
         actorName: currentUser.fullName,
         actorRole: currentUser.role,
@@ -891,8 +1027,7 @@ export default function App() {
         comments: auditComment,
       };
 
-      const newCr: ChangeRequest = {
-        id: targetCrId,
+      const newCrPayload: Partial<ChangeRequest> = {
         title: requestData.title || 'Untitled Request',
         requesterId: currentUser.id,
         requesterName: currentUser.fullName,
@@ -904,19 +1039,19 @@ export default function App() {
         slaTargetHours: getPrioritySlaHours(requestData.priority || 'Medium'),
         hodApprovalSkipped: !isDraft && isCritical,
         hodSkipReason: !isDraft && isCritical ? 'Critical Priority Direct-Route to IT Admin (Emergency)' : undefined,
-        categoryId: requestData.categoryId || 'cat-biz-apps',
-        categoryName: requestData.categoryName || requestData.category || 'Business Applications',
-        category: requestData.category || 'Business Applications',
-        serviceId: requestData.serviceId || 'srv-biz-prod',
-        serviceName: requestData.serviceName || requestData.subcategory || 'Production System',
-        subcategory: requestData.subcategory || 'Production System',
-        applicationAssetId: requestData.applicationAssetId || 'app-pcs-net',
-        applicationAssetName: requestData.applicationAssetName || requestData.applicationName || 'PCS.NET',
-        applicationName: requestData.applicationName || 'PCS.NET',
+        categoryId: requestData.categoryId || categories[0]?.id || '',
+        categoryName: requestData.categoryName || requestData.category || categories[0]?.name || '',
+        category: requestData.category || requestData.categoryName || categories[0]?.name || '',
+        serviceId: requestData.serviceId || services[0]?.id || '',
+        serviceName: requestData.serviceName || requestData.subcategory || services[0]?.name || '',
+        subcategory: requestData.subcategory || requestData.serviceName || services[0]?.name || '',
+        applicationAssetId: requestData.applicationAssetId || applications[0]?.id || '',
+        applicationAssetName: requestData.applicationAssetName || requestData.applicationName || applications[0]?.name || '',
+        applicationName: requestData.applicationName || requestData.applicationAssetName || applications[0]?.name || '',
         assetTag: requestData.assetTag,
-        issueTypeId: requestData.issueTypeId || 'issue-incident',
-        issueTypeName: requestData.issueTypeName || requestData.issueType || 'Incident',
-        issueType: requestData.issueType || 'Incident',
+        issueTypeId: requestData.issueTypeId || issueTypes[0]?.id || '',
+        issueTypeName: requestData.issueTypeName || requestData.issueType || issueTypes[0]?.name || '',
+        issueType: requestData.issueType || requestData.issueTypeName || issueTypes[0]?.name || '',
         applicationAreas: requestData.applicationAreas || [],
         affectedModules: requestData.affectedModules || [],
         currentBehaviorDescription: requestData.currentBehaviorDescription || '',
@@ -924,17 +1059,22 @@ export default function App() {
         businessJustification: requestData.businessJustification || '',
         attachments: requestData.attachments || [],
         requestedCompletionDate: requestData.requestedCompletionDate || now,
-        createdAt: now,
-        updatedAt: now,
         status: newStatus,
         approvalHistory: [initialHistory],
       };
 
-      updatedRequests = [newCr, ...changeRequests];
-      setChangeRequests(updatedRequests);
+      // Persist directly to PostgreSQL database
+      const res = await api.createChangeRequest(newCrPayload);
+      if (!res.success || !res.data) {
+        alert(`Failed to save change request to PostgreSQL database: ${res.message || 'Unknown database error'}`);
+        return;
+      }
 
-      // Persist new change request and initial audit history to PostgreSQL database
-      api.createChangeRequest(newCr).catch((err) => console.warn('[DB Create CR Notice]', err));
+      const persistedRecord = normalizeCr(res.data);
+      const targetCrId = persistedRecord.id;
+
+      // Update React state strictly with the confirmed PostgreSQL persisted record
+      setChangeRequests((prev) => [persistedRecord, ...prev]);
 
       if (!isDraft && targetCrId) {
         const targetDept = departments.find((d) => d.id === currentUser.departmentId) || departments[0];
@@ -946,7 +1086,7 @@ export default function App() {
           const emailLog = createStateTransitionEmail({
             changeRequestId: targetCrId,
             requestTitle: requestData.title || 'Untitled Request',
-            recipientEmail: `david.it@company.com; ${currentUser.email}; ${targetHodEmail}`,
+            recipientEmail: `TEMIT@tanaka.com.my; ${currentUser.email}; ${targetHodEmail}`,
             recipientName: `IT Admin Team & ${currentUser.fullName} (CC: HOD ${targetHodName})`,
             previousStatus: 'New Request',
             newStatus: 'Pending IT Admin Review',
@@ -977,18 +1117,19 @@ export default function App() {
             changeRequestId: targetCrId,
           };
 
-          setNotifications([itNotif, hodNotif, ...notifications]);
+          setNotifications((prev) => [itNotif, hodNotif, ...prev]);
         } else {
-          // Standard first-time submission to HOD
+          // Standard first-time submission to HOD (sent strictly to HOD for approval)
           const emailLog = createStateTransitionEmail({
             changeRequestId: targetCrId,
             requestTitle: requestData.title || 'Untitled Request',
-            recipientEmail: `${targetHodEmail}; ${currentUser.email}`,
-            recipientName: `${targetHodName} / ${currentUser.fullName}`,
+            recipientEmail: targetHodEmail,
+            recipientName: targetHodName,
             previousStatus: 'New Request',
             newStatus: 'Pending HOD Approval',
             actionTaken: 'Submitted for HOD Approval',
             actorName: currentUser.fullName,
+            actorRole: 'Requester',
             comments: 'Change Request submitted for Department HOD authorization.',
             smtpConfig,
           });
@@ -1004,13 +1145,13 @@ export default function App() {
             read: false,
             changeRequestId: targetCrId,
           };
-          setNotifications([newNotif, ...notifications]);
+          setNotifications((prev) => [newNotif, ...prev]);
         }
       }
-    }
 
-    setEditingCr(null);
-    setAppNavTab('myrequests');
+      setEditingCr(null);
+      setAppNavTab('myrequests');
+    }
   };
 
   const handleProcessHodApproval = (
@@ -1018,7 +1159,7 @@ export default function App() {
     decision: 'Approve' | 'Reject' | 'SendBack',
     comments: string
   ) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     const delegationCtx = getUserDelegationContext(currentUser, delegations);
 
     const targetCr = changeRequests.find((c) => c.id === crId);
@@ -1068,7 +1209,7 @@ export default function App() {
             const emailLog = createStateTransitionEmail({
               changeRequestId: cr.id,
               requestTitle: cr.title,
-              recipientEmail: `${devEmail}; ${cr.requesterEmail}; david.it@company.com`,
+              recipientEmail: `${devEmail}; ${cr.requesterEmail}; TEMIT@tanaka.com.my`,
               recipientName: `${cr.assignedDeveloperName} (Assigned Dev), ${cr.requesterName} (Requester) & IT Admin`,
               previousStatus: cr.status,
               newStatus: 'In Progress',
@@ -1118,12 +1259,13 @@ export default function App() {
             const emailLog = createStateTransitionEmail({
               changeRequestId: cr.id,
               requestTitle: cr.title,
-              recipientEmail: `david.it@company.com; ${cr.requesterEmail}`,
-              recipientName: `${cr.requesterName} & IT Admin Team`,
+              recipientEmail: 'TEMIT@tanaka.com.my',
+              recipientName: 'IT Admin Team',
               previousStatus: cr.status,
               newStatus: 'Pending IT Admin Review',
               actionTaken: 'HOD Approved — Sent to IT Admin for Assignment',
               actorName: currentUser.fullName,
+              actorRole: actorRole,
               comments,
               smtpConfig,
             });
@@ -1187,7 +1329,7 @@ export default function App() {
           returnedByRole: decision === 'SendBack' ? 'Department HOD' : undefined,
           itClarificationRequested: decision === 'Approve' ? false : cr.itClarificationRequested,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
       }
       return cr;
@@ -1197,7 +1339,7 @@ export default function App() {
 
     // Persist HOD approval decision to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: targetUpdated.status,
         hodApprovedAt: targetUpdated.hodApprovedAt,
@@ -1211,8 +1353,8 @@ export default function App() {
 
   // IT Staff (IT Admin, Developer, System Admin) Return to Requester for Clarification
   const handleItSendBackToRequester = (crId: string, comments: string) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
-    const actorRoleTitle = currentUser.role === 'Software Developer' ? 'Software Developer' : currentUser.role === 'System Admin' ? 'System Admin' : 'IT Admin';
+    const now = getMalaysianTimestamp();
+    const actorRoleTitle = currentUser.role === 'Software Developer' ? 'Software Developer' : currentUser.role === 'System Admin' ? 'System Admin' : currentUser.role === 'IT Helpdesk' ? 'IT Helpdesk' : 'IT Admin';
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
@@ -1234,17 +1376,18 @@ export default function App() {
         const hodEmail = targetDept?.hodEmail || 'ASTRID@tanaka.com.my';
         const hodName = targetDept?.hodName || 'Department HOD';
 
-        // Dispatch Email to Requester with HOD CC'd so HOD retains full audit visibility
+        // Dispatch Email directly to Requester
         const emailLog = createStateTransitionEmail({
           changeRequestId: cr.id,
           requestTitle: cr.title,
-          recipientEmail: `${cr.requesterEmail}; ${hodEmail}`,
-          recipientName: `${cr.requesterName} (CC: HOD ${hodName})`,
+          recipientEmail: cr.requesterEmail,
+          recipientName: cr.requesterName,
           previousStatus: cr.status,
           newStatus: 'Returned to Requester',
           actionTaken: `IT Clarification Requested by ${currentUser.fullName} (${actorRoleTitle})`,
           actorName: currentUser.fullName,
-          comments: `${actorRoleTitle} notes: ${comments}. Resubmission from requester will go to Department HOD for approval, and upon HOD approval will route straight to the assigned IT developer.`,
+          actorRole: actorRoleTitle,
+          comments: `${actorRoleTitle} notes: ${comments}. (SLA Timer is paused until your response).`,
           smtpConfig,
         });
         dispatchEmailLog(emailLog);
@@ -1253,8 +1396,8 @@ export default function App() {
         const reqNotif: NotificationItem = {
           id: `notif-${Date.now()}`,
           userId: cr.requesterId,
-          title: `IT Staff Requested More Details (${actorRoleTitle})`,
-          message: `${currentUser.fullName} (${actorRoleTitle}) requested clarification on ${cr.id}: "${comments}". When you submit updates, it will go to your Department HOD for approval, and upon approval will route straight back to the assigned IT developer.`,
+          title: `⚠️ Action Required: IT Requested Details (${actorRoleTitle})`,
+          message: `${currentUser.fullName} (${actorRoleTitle}) requested clarification on ${cr.id}: "${comments}". SLA timer is paused until you reply.`,
           createdAt: now,
           read: false,
           changeRequestId: cr.id,
@@ -1264,7 +1407,7 @@ export default function App() {
           id: `notif-${Date.now() + 1}`,
           userId: targetDept?.hodUserId || 'user-hod-prod',
           title: 'Audit Notice: IT Sent Back to Requester',
-          message: `IT staff ${currentUser.fullName} (${actorRoleTitle}) returned ${cr.id} (${cr.title}) to requester for technical clarification. When resubmitted, it will return to your HOD queue for approval.`,
+          message: `IT staff ${currentUser.fullName} (${actorRoleTitle}) returned ${cr.id} (${cr.title}) to requester for technical clarification.`,
           createdAt: now,
           read: false,
           changeRequestId: cr.id,
@@ -1277,8 +1420,12 @@ export default function App() {
           status: 'Returned to Requester' as RequestStatus,
           returnedByRole: actorRoleTitle as any,
           itClarificationRequested: true,
+          slaPausedAt: now,
+          reminderCount: 0,
+          lastReminderSentAt: undefined,
+          lastReminderStage: undefined,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
       }
       return cr;
@@ -1288,14 +1435,169 @@ export default function App() {
 
     // Persist IT Return to Requester in PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: 'Returned to Requester',
         returnedByRole: actorRoleTitle,
         itClarificationRequested: true,
+        slaPausedAt: now,
+        reminderCount: 0,
         newApprovalHistoryEntry: targetUpdated.approvalHistory[0],
       }).catch((err) => console.warn('[DB Send Back Notice]', err));
     }
+  };
+
+  // 🔔 3-Stage Chase Policy Dispatcher
+  const handleSendReminderNudge = (crId: string, stage: 1 | 2 | 3, customNote?: string) => {
+    const now = getMalaysianTimestamp();
+    const stageInfo = getChaseStageInfo(stage);
+    const targetCr = changeRequests.find((c) => c.id === crId);
+    if (!targetCr) return;
+
+    const newReminderCount = (targetCr.reminderCount || 0) + 1;
+    const history: ApprovalHistoryEntry = {
+      id: `hist-${Date.now()}`,
+      changeRequestId: crId,
+      actorUserId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      actionDate: now,
+      fromStatus: targetCr.status,
+      toStatus: targetCr.status,
+      decision: 'Reminder Sent (Chase Policy)',
+      comments: customNote || `${stageInfo.shortBadge} (${stageInfo.title}) dispatched by ${currentUser.fullName} (${currentUser.role}). Reminder #${newReminderCount}.`,
+    };
+
+    const targetDept = departments.find((d) => d.id === targetCr.departmentId);
+    const hodEmail = targetDept?.hodEmail || 'ASTRID@tanaka.com.my';
+
+    const recipientEmails = stage >= 2
+      ? `${targetCr.requesterEmail}; ${hodEmail}`
+      : targetCr.requesterEmail;
+
+    // Dispatch Email Notification
+    const emailLog = createStateTransitionEmail({
+      changeRequestId: targetCr.id,
+      requestTitle: targetCr.title,
+      recipientEmail: recipientEmails,
+      recipientName: `${targetCr.requesterName}${stage >= 2 ? ' (CC: Department HOD)' : ''}`,
+      previousStatus: targetCr.status,
+      newStatus: targetCr.status,
+      actionTaken: `CHASE NOTICE [${stageInfo.shortBadge}]: Action Required`,
+      actorName: currentUser.fullName,
+      comments: customNote || `Action required on CR ${targetCr.id}. The resolution SLA timer is currently paused awaiting your response. Please review and provide the requested details.`,
+      smtpConfig,
+    });
+    dispatchEmailLog(emailLog);
+
+    // In-App Notification
+    const reqNotif: NotificationItem = {
+      id: `notif-${Date.now()}`,
+      userId: targetCr.requesterId,
+      title: stage === 3 ? '🚨 FINAL NOTICE: CR Awaiting Clarification' : stage === 2 ? '⚠️ Urgent Reminder: Clarification Needed' : '🔔 Friendly Reminder: Clarification Needed',
+      message: customNote || `CR ${targetCr.id} (${targetCr.title}) requires your clarification. SLA is paused. Please provide updates. (${stageInfo.shortBadge})`,
+      createdAt: now,
+      read: false,
+      changeRequestId: targetCr.id,
+    };
+    setNotifications((prev) => [reqNotif, ...prev]);
+
+    const updated = changeRequests.map((cr) => {
+      if (cr.id === crId) {
+        return {
+          ...cr,
+          reminderCount: newReminderCount,
+          lastReminderSentAt: now,
+          lastReminderStage: stage,
+          updatedAt: now,
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
+        };
+      }
+      return cr;
+    });
+    setChangeRequests(updated);
+
+    api.updateChangeRequest(crId, {
+      reminderCount: newReminderCount,
+      lastReminderSentAt: now,
+      lastReminderStage: stage,
+      newApprovalHistoryEntry: history,
+    }).catch((err) => console.warn('[DB Nudge Update]', err));
+  };
+
+  // 🚨 3-Strike Rule Auto-Withdrawal
+  const handleAutoCloseInactive = (crId: string, reason: string) => {
+    const now = getMalaysianTimestamp();
+    const targetCr = changeRequests.find((c) => c.id === crId);
+    if (!targetCr) return;
+
+    const history: ApprovalHistoryEntry = {
+      id: `hist-${Date.now()}`,
+      changeRequestId: crId,
+      actorUserId: currentUser.id,
+      actorName: currentUser.fullName,
+      actorRole: currentUser.role,
+      actionDate: now,
+      fromStatus: targetCr.status,
+      toStatus: 'Closed (Rejected)',
+      decision: 'Auto-Closed (No Response)',
+      comments: `Auto-withdrawn under 3-Strike Inactivity Policy: "${reason}". Seamlessly reopenable anytime by Requester or Admin.`,
+    };
+
+    const targetDept = departments.find((d) => d.id === targetCr.departmentId);
+    const hodEmail = targetDept?.hodEmail || 'ASTRID@tanaka.com.my';
+
+    const emailLog = createStateTransitionEmail({
+      changeRequestId: targetCr.id,
+      requestTitle: targetCr.title,
+      recipientEmail: `${targetCr.requesterEmail}; ${hodEmail}`,
+      recipientName: `${targetCr.requesterName} & Department HOD`,
+      previousStatus: targetCr.status,
+      newStatus: 'Closed (Rejected)',
+      actionTaken: 'Auto-Withdrawn (3-Strike Inactivity Policy)',
+      actorName: `${currentUser.fullName} (IT Policy Automation)`,
+      comments: reason,
+      smtpConfig,
+    });
+    dispatchEmailLog(emailLog);
+
+    const reqNotif: NotificationItem = {
+      id: `notif-${Date.now()}`,
+      userId: targetCr.requesterId,
+      title: 'CR Auto-Withdrawn (Inactivity Policy)',
+      message: `CR ${targetCr.id} was auto-withdrawn due to 7+ days of inactivity without clarification. You can reopen this request at any time when ready.`,
+      createdAt: now,
+      read: false,
+      changeRequestId: targetCr.id,
+    };
+    setNotifications((prev) => [reqNotif, ...prev]);
+
+    const updated = changeRequests.map((cr) => {
+      if (cr.id === crId) {
+        return {
+          ...cr,
+          status: 'Closed (Rejected)' as RequestStatus,
+          isAutoClosedInactive: true,
+          rejectionReason: reason,
+          rejectedByName: `${currentUser.fullName} (3-Strike Auto-Policy)`,
+          rejectedByRole: 'IT Admin' as any,
+          rejectedAt: now,
+          updatedAt: now,
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
+        };
+      }
+      return cr;
+    });
+    setChangeRequests(updated);
+
+    api.updateChangeRequest(crId, {
+      status: 'Closed (Rejected)',
+      rejectionReason: reason,
+      rejectedByName: `${currentUser.fullName} (3-Strike Auto-Policy)`,
+      rejectedByRole: 'IT Admin',
+      rejectedAt: now,
+      newApprovalHistoryEntry: history,
+    }).catch((err) => console.warn('[DB Auto-Close Update]', err));
   };
 
   const handleAssignDeveloper = (
@@ -1305,7 +1607,7 @@ export default function App() {
     targetDate: string,
     comments: string
   ) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
@@ -1314,7 +1616,7 @@ export default function App() {
           changeRequestId: cr.id,
           actorUserId: currentUser.id,
           actorName: currentUser.fullName,
-          actorRole: 'IT Admin',
+          actorRole: currentUser.role,
           actionDate: now,
           fromStatus: cr.status,
           toStatus: 'In Progress',
@@ -1347,7 +1649,7 @@ export default function App() {
           assignedDeveloperName: developerName,
           targetCompletionDate: targetDate,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
       }
       return cr;
@@ -1357,7 +1659,7 @@ export default function App() {
 
     // Persist developer assignment to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: 'In Progress',
         assignedDeveloperId: developerId,
@@ -1377,7 +1679,7 @@ export default function App() {
     afterChangeDetails?: string,
     hasCodeOrDatabaseChanges?: boolean
   ) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
@@ -1404,7 +1706,7 @@ export default function App() {
         const emailLog = createStateTransitionEmail({
           changeRequestId: cr.id,
           requestTitle: cr.title,
-          recipientEmail: `david.it@company.com; ${cr.requesterEmail}`,
+          recipientEmail: `TEMIT@tanaka.com.my; ${cr.requesterEmail}`,
           recipientName: `IT Admin & ${cr.requesterName}`,
           previousStatus: cr.status,
           newStatus,
@@ -1425,7 +1727,7 @@ export default function App() {
           riskAssessment: updatedRisk || cr.riskAssessment,
           updatedAt: now,
           actualCompletionDate: newStatus === 'Pending IT Verification' ? now.split(' ')[0] : cr.actualCompletionDate,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
       }
       return cr;
@@ -1435,7 +1737,7 @@ export default function App() {
 
     // Persist developer status updates and technical notes to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: newStatus,
         implementationNotes: techNotes,
@@ -1450,7 +1752,7 @@ export default function App() {
   };
 
   const handleVerifyRelease = (crId: string, verified: boolean, comments: string) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
@@ -1489,7 +1791,7 @@ export default function App() {
           status: newStatus,
           updatedAt: now,
           actualCompletionDate: verified ? now.split(' ')[0] : cr.actualCompletionDate,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
       }
       return cr;
@@ -1499,7 +1801,7 @@ export default function App() {
 
     // Persist release verification to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: targetUpdated.status,
         actualCompletionDate: targetUpdated.actualCompletionDate,
@@ -1511,7 +1813,7 @@ export default function App() {
   };
 
   const handleItDirectModify = (payload: ItDirectModifyPayload) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     const targetCategory = payload.categoryName || payload.category || '';
     const targetIssueType = payload.issueTypeName || payload.issueType;
     const targetApplication = payload.applicationAssetName || payload.applicationName;
@@ -1618,7 +1920,7 @@ export default function App() {
           assignedDeveloperName: payload.assignedDeveloperName !== undefined ? payload.assignedDeveloperName : cr.assignedDeveloperName,
           targetCompletionDate: payload.targetCompletionDate || cr.targetCompletionDate,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
 
         // Update modal state if open
@@ -1639,7 +1941,7 @@ export default function App() {
 
   // IT Admin, System IT Admin, IT Staff, Developer, and HOD can reject a case or ticket
   const handleRejectCase = (crId: string, rejectionReason: string) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
@@ -1707,7 +2009,7 @@ export default function App() {
           rejectedAt: now,
           rejectionReason: rejectionReason,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
 
         if (selectedCrForModal?.id === cr.id) {
@@ -1723,7 +2025,7 @@ export default function App() {
 
     // Persist ticket rejection to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: 'Closed (Rejected)',
         rejectedByUserId: currentUser.id,
@@ -1743,14 +2045,15 @@ export default function App() {
       return;
     }
 
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
 
     const updated = changeRequests.map((cr) => {
       if (cr.id === crId) {
         // Find rejecting actor information
-        const rejectorUserId = cr.rejectedByUserId || (cr.approvalHistory.find((h) => h.decision === 'Rejected')?.actorUserId) || 'user-dev-1';
-        const rejectorName = cr.rejectedByName || (cr.approvalHistory.find((h) => h.decision === 'Rejected')?.actorName) || 'Alex Chen';
-        const rejectorRole = cr.rejectedByRole || (cr.approvalHistory.find((h) => h.decision === 'Rejected')?.actorRole) || 'Software Developer';
+        const historyList = Array.isArray(cr.approvalHistory) ? cr.approvalHistory : [];
+        const rejectorUserId = cr.rejectedByUserId || (historyList.find((h) => h.decision === 'Rejected')?.actorUserId) || 'user-dev-1';
+        const rejectorName = cr.rejectedByName || (historyList.find((h) => h.decision === 'Rejected')?.actorName) || 'Alex Chen';
+        const rejectorRole = cr.rejectedByRole || (historyList.find((h) => h.decision === 'Rejected')?.actorRole) || 'Software Developer';
 
         // Determine destination status & assignments
         let targetStatus: RequestStatus = 'In Progress';
@@ -1836,7 +2139,7 @@ export default function App() {
           reopenedAt: now,
           reopenComments: reopenComments,
           updatedAt: now,
-          approvalHistory: [history, ...cr.approvalHistory],
+          approvalHistory: [history, ...(cr.approvalHistory || [])],
         };
 
         if (selectedCrForModal?.id === cr.id) {
@@ -1852,7 +2155,7 @@ export default function App() {
 
     // Persist reopened case to PostgreSQL database
     const targetUpdated = updated.find((c) => c.id === crId);
-    if (targetUpdated) {
+    if (targetUpdated && targetUpdated.approvalHistory && targetUpdated.approvalHistory.length > 0) {
       api.updateChangeRequest(crId, {
         status: targetUpdated.status,
         assignedDeveloperId: targetUpdated.assignedDeveloperId,
@@ -1866,59 +2169,90 @@ export default function App() {
     }
   };
 
-  const handleSendWelcomeEmail = (newUser: UserProfile, defaultPass: string) => {
-    const emailLog = createWelcomeAccountEmail(newUser, defaultPass, smtpConfig);
+  const handleSendWelcomeEmail = (newUser: UserProfile) => {
+    const emailLog = createWelcomeAccountEmail(newUser, smtpConfig);
     dispatchEmailLog(emailLog);
   };
 
   const handleApproveUser = async (userId: string, assignedDeptId?: number): Promise<{ success: boolean; verified?: boolean; message?: string; data?: UserProfile; database?: string }> => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     const targetUser = users.find((u) => u.id === userId);
-    if (!targetUser) return { success: false, message: 'User not found in client state.' };
+    if (!targetUser) return { success: false, message: `User with ID "${userId}" not found in system records.` };
 
-    const targetDept = departments.find((d) => d.id === (assignedDeptId || targetUser.departmentId)) || departments[0];
+    // 1. Resolve Department: Ensure department ID and Name are valid and verified
+    const targetDeptId = assignedDeptId || targetUser.departmentId;
+    const targetDept = departments.find((d) => d.id === targetDeptId);
+    if (!targetDept) {
+      return {
+        success: false,
+        verified: false,
+        message: `Cannot approve user: Department ID (${targetDeptId}) could not be resolved. Please assign a valid Tanaka department.`,
+      };
+    }
+
+    if (!targetUser.fullName || !targetUser.email) {
+      return {
+        success: false,
+        verified: false,
+        message: 'Cannot approve user: Missing required full name or work email address.',
+      };
+    }
 
     try {
-      // 1. Execute Real-Time Approval & Verification in PostgreSQL
+      // 2. Execute Real-Time Approval & Verification in PostgreSQL (Preserving user's registered password)
       const res = await api.approveUser(userId, {
         fullName: targetUser.fullName,
         email: targetUser.email,
+        username: targetUser.username || targetUser.email.split('@')[0],
         departmentId: targetDept.id,
         departmentName: targetDept.name,
-        role: targetUser.role,
-        password: targetUser.password,
+        role: targetUser.role || 'Requester',
       });
 
-      if (!res.success) {
+      if (!res.success || !res.verified) {
         throw new Error(res.message || 'PostgreSQL database rejected user approval.');
       }
 
       const approvedUser: UserProfile = {
         ...targetUser,
+        ...(res.data || {}),
         status: 'Active',
         departmentId: targetDept.id,
         departmentName: targetDept.name,
+        role: targetUser.role || 'Requester',
+        password: targetUser.password,
+        mustChangePassword: false,
       };
 
       const updatedUsers = users.map((u) => (u.id === userId ? approvedUser : u));
       handleUpdateUsers(updatedUsers);
 
-      // Send automated SMTP confirmation email to the user
-      const emailLog = createUserApprovedEmail(approvedUser, currentUser.fullName, smtpConfig);
-      dispatchEmailLog(emailLog);
+      // 3. Send Official Account Approval Notification (With direct Login button)
+      const approvalEmail = createUserApprovedEmail(
+        approvedUser,
+        currentUser?.fullName || 'IT Administration',
+        smtpConfig
+      );
+      dispatchEmailLog(approvalEmail);
 
-      // Notification
+      // In-app Notification
       const notif: NotificationItem = {
         id: `notif-${Date.now()}`,
         userId: approvedUser.id,
         title: 'Account Approved & Activated',
-        message: `Your Tanaka PCS account has been approved by IT Admin ${currentUser.fullName}. You can now submit change requests.`,
+        message: `Your Tanaka IT OPS account has been approved by IT Admin ${currentUser?.fullName || 'Administrator'}. You may now log in using your registered password.`,
         createdAt: now,
         read: false,
       };
-      setNotifications([notif, ...notifications]);
+      setNotifications((prev) => [notif, ...prev]);
 
-      return res;
+      return {
+        success: true,
+        verified: true,
+        database: res.database || 'PostgreSQL (IT_OPS)',
+        data: approvedUser,
+        message: `Account for "${approvedUser.fullName}" successfully approved and activated. Approval confirmation email dispatched to ${approvedUser.email}.`,
+      };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[Approval Action Error]', errorMsg);
@@ -1927,7 +2261,7 @@ export default function App() {
   };
 
   const handleReassignDepartment = (userId: string, newDeptId: number) => {
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const now = getMalaysianTimestamp();
     const targetUser = users.find((u) => u.id === userId);
     const newDept = departments.find((d) => d.id === newDeptId);
     if (!targetUser || !newDept) return;
@@ -2017,7 +2351,7 @@ export default function App() {
       userId: targetUser.id,
       title: 'Emergency Password Reset Issued',
       message: `Your account password was reset by IT Administrator ${currentUser.fullName}. Temporary credentials were dispatched to ${targetUser.email}.`,
-      createdAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      createdAt: getMalaysianTimestamp(),
       read: false,
     };
     setNotifications([notif, ...notifications]);
@@ -2026,6 +2360,16 @@ export default function App() {
   const handleMarkNotificationRead = (id: string) => {
     setNotifications(
       notifications.map((n) => (n.id === id ? { ...n, read: true } : n))
+    );
+  };
+
+  const handleMarkAllNotificationsRead = () => {
+    setNotifications(
+      notifications.map((n) =>
+        n.userId === currentUser?.id || !n.userId || n.userId === 'all'
+          ? { ...n, read: true }
+          : n
+      )
     );
   };
 
@@ -2039,7 +2383,7 @@ export default function App() {
     const delegationCtx = getUserDelegationContext(currentUser, delegations);
     switch (appNavTab) {
       case 'dashboard':
-        return currentUser.role === 'Software Developer' || currentUser.role === 'IT Admin' || currentUser.role === 'System Admin'
+        return currentUser.role === 'Software Developer' || currentUser.role === 'IT Admin' || currentUser.role === 'System Admin' || currentUser.role === 'IT Helpdesk'
           ? 'IT Dashboard'
           : `${currentUser.role} Dashboard`;
       case 'myrequests':
@@ -2090,9 +2434,9 @@ export default function App() {
             handleSwitchUser(user);
             setShowLoginModal(false);
           }}
-          onRegisterUser={(newUser) => {
-            handleUpdateUsers([newUser, ...users]);
-          }}
+          onRegisterUser={handleRegisterUser}
+          onRequestPasswordResetOtp={handleRequestPasswordResetOtp}
+          onCompletePasswordReset={handleCompletePasswordReset}
           onClose={() => {}}
         />
       </div>
@@ -2110,6 +2454,7 @@ export default function App() {
         notifications={notifications}
         onMarkNotificationRead={handleMarkNotificationRead}
         onRequestClick={handleOpenDetailModal}
+        onOpenNotificationsModal={() => setShowNotificationsModal(true)}
         pendingHodCount={pendingHodCount}
         pendingItCount={pendingItCount}
         assignedDevCount={assignedDevCount}
@@ -2118,10 +2463,11 @@ export default function App() {
           setEditingCr(null);
           setAppNavTab('new');
         }}
-        onOpenSmtpConsole={() => setShowSmtpConsoleModal(true)}
+        onOpenSmtpConsole={() => setAppNavTab('emails')}
         emailCount={emailLogs.length}
         users={users}
         delegations={delegations}
+        customRoles={customRoles}
       />
 
       {/* Main Right Content Canvas */}
@@ -2130,6 +2476,25 @@ export default function App() {
         <header className="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between sticky top-0 z-30 shadow-xs">
           <div className="flex items-center space-x-3">
             <h2 className="text-base font-bold text-slate-900 tracking-tight">{getViewTitle()}</h2>
+          </div>
+
+          <div className="flex items-center space-x-3">
+            {/* Quick Notification Bell in Top Bar */}
+            <button
+              type="button"
+              onClick={() => setShowNotificationsModal(true)}
+              className="relative p-2.5 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200 transition-colors cursor-pointer flex items-center space-x-2"
+              title="Open Notification Center"
+              aria-label="Open Notification Center"
+            >
+              <Bell className="w-4 h-4 text-slate-700" />
+              <span className="hidden md:inline text-xs font-semibold text-slate-700">Notifications</span>
+              {notifications.filter((n) => !n.read && (n.userId === currentUser.id || !n.userId || n.userId === 'all')).length > 0 && (
+                <span className="bg-rose-500 text-white text-[10px] font-black px-1.5 py-0.2 rounded-full animate-pulse shadow-xs">
+                  {notifications.filter((n) => !n.read && (n.userId === currentUser.id || !n.userId || n.userId === 'all')).length}
+                </span>
+              )}
+            </button>
           </div>
         </header>
 
@@ -2141,6 +2506,10 @@ export default function App() {
               changeRequests={changeRequests}
               onNavigateTab={(tab) => setAppNavTab(tab)}
               onRequestClick={handleOpenDetailModal}
+              onEditRequest={(cr) => {
+                setEditingCr(cr);
+                setAppNavTab('new');
+              }}
               onCreateNewRequest={() => {
                 setEditingCr(null);
                 setAppNavTab('new');
@@ -2167,16 +2536,23 @@ export default function App() {
 
           {appNavTab === 'new' && (
             <ChangeRequestForm
+              key={editingCr?.id || 'new-cr-form'}
               currentUser={currentUser}
               initialData={editingCr}
               onSubmitRequest={handleCreateOrUpdateRequest}
-              onCancel={() => setAppNavTab('myrequests')}
+              onCancel={() => {
+                setEditingCr(null);
+                setAppNavTab('myrequests');
+              }}
               departments={departments}
               storageConfig={storageConfig}
               categories={categories}
               services={services}
               applications={applications}
               issueTypes={issueTypes}
+              modules={modules}
+              subFunctions={subFunctions}
+              processes={processes}
             />
           )}
 
@@ -2197,12 +2573,18 @@ export default function App() {
             <ItAdminQueueView
               currentUser={currentUser}
               changeRequests={changeRequests}
+              users={users}
+              customRoles={customRoles}
               onAssignDeveloper={handleAssignDeveloper}
               onVerifyRelease={handleVerifyRelease}
               onSendBackToRequester={handleItSendBackToRequester}
               onItDirectModify={handleItDirectModify}
               onRejectCase={handleRejectCase}
               onRequestClick={handleOpenDetailModal}
+              categories={categories}
+              services={services}
+              applications={applications}
+              issueTypes={issueTypes}
             />
           )}
 
@@ -2210,11 +2592,17 @@ export default function App() {
             <DeveloperKanbanView
               currentUser={currentUser}
               changeRequests={changeRequests}
+              users={users}
+              customRoles={customRoles}
               onUpdateDevStatus={handleUpdateDevStatus}
               onSendBackToRequester={handleItSendBackToRequester}
               onItDirectModify={handleItDirectModify}
               onRejectCase={handleRejectCase}
               onRequestClick={handleOpenDetailModal}
+              categories={categories}
+              services={services}
+              applications={applications}
+              issueTypes={issueTypes}
             />
           )}
 
@@ -2230,8 +2618,6 @@ export default function App() {
           {appNavTab === 'admin' && (
             <AdminUserMgmtView
               currentUser={currentUser}
-              moduleHierarchyMap={moduleHierarchyMap}
-              onUpdateModuleHierarchy={handleUpdateModuleHierarchy}
               departments={departments}
               onUpdateDepartments={handleUpdateDepartments}
               users={users}
@@ -2257,6 +2643,25 @@ export default function App() {
               onUpdateSubFunctions={handleUpdateSubFunctions}
               processes={processes}
               onUpdateProcesses={handleUpdateProcesses}
+              smtpConfig={smtpConfig}
+              onUpdateSmtpConfig={handleUpdateSmtpConfig}
+              emailLogs={emailLogs}
+              onClearEmailLogs={handleClearEmailLogs}
+              customRoles={customRoles}
+              onUpdateCustomRoles={handleUpdateCustomRoles}
+              initialAdminTab={adminInitialTab}
+              onRequestClick={handleOpenDetailModal}
+            />
+          )}
+
+          {appNavTab === 'emails' && hasRolePermission(currentUser.role, 'canViewEmailHub', customRoles) && (
+            <EmailContextTemplateAdminView
+              currentUser={currentUser}
+              smtpConfig={smtpConfig}
+              onUpdateSmtpConfig={handleUpdateSmtpConfig}
+              emailLogs={emailLogs}
+              onClearEmailLogs={handleClearEmailLogs}
+              onRequestClick={handleOpenDetailModal}
             />
           )}
 
@@ -2283,16 +2688,31 @@ export default function App() {
       </div>
 
       {/* Comprehensive Request Detail Modal Drawer */}
-      <RequestDetailModal
-        changeRequest={selectedCrForModal}
-        onClose={() => setSelectedCrForModal(null)}
-        currentUser={currentUser}
-        changeRequests={changeRequests}
-        onSendBackToRequester={handleItSendBackToRequester}
-        onItDirectModify={handleItDirectModify}
-        onRejectCase={handleRejectCase}
-        onReopenCase={handleReopenCase}
-      />
+      {selectedCrForModal && (
+        <RequestDetailModal
+          changeRequest={selectedCrForModal}
+          onClose={() => setSelectedCrForModal(null)}
+          currentUser={currentUser}
+          users={users}
+          customRoles={customRoles}
+          changeRequests={changeRequests}
+          categories={categories}
+          services={services}
+          applications={applications}
+          issueTypes={issueTypes}
+          onEditRequest={(cr) => {
+            setSelectedCrForModal(null);
+            setEditingCr(cr);
+            setAppNavTab('new');
+          }}
+          onSendBackToRequester={handleItSendBackToRequester}
+          onItDirectModify={handleItDirectModify}
+          onRejectCase={handleRejectCase}
+          onReopenCase={handleReopenCase}
+          onSendReminderNudge={handleSendReminderNudge}
+          onAutoCloseInactive={handleAutoCloseInactive}
+        />
+      )}
 
       {/* Authentication Login & Account Switcher Modal */}
       {showLoginModal && (
@@ -2317,14 +2737,16 @@ export default function App() {
         />
       )}
 
-      {/* SMTP Email Outbox & Relay Console Modal - Only for Admin Accounts */}
-      {showSmtpConsoleModal && (currentUser.role === 'System Admin' || currentUser.role === 'IT Admin') && (
-        <SmtpConsoleModal
-          isOpen={showSmtpConsoleModal}
-          smtpConfig={smtpConfig}
-          onUpdateSmtpConfig={handleUpdateSmtpConfig}
-          emailLogs={emailLogs}
-          onClose={() => setShowSmtpConsoleModal(false)}
+      {/* Full-Featured Notification Center Modal */}
+      {showNotificationsModal && (
+        <NotificationCenterModal
+          isOpen={showNotificationsModal}
+          onClose={() => setShowNotificationsModal(false)}
+          notifications={notifications}
+          currentUser={currentUser}
+          onMarkRead={handleMarkNotificationRead}
+          onMarkAllRead={handleMarkAllNotificationsRead}
+          onRequestClick={handleOpenDetailModal}
         />
       )}
     </div>

@@ -3,7 +3,8 @@ import { UserProfile, ChangeRequest, TemporaryApproverDelegation, Department } f
 import { DelegationManagementModal } from './DelegationManagementModal';
 import { getUserDelegationContext, getDelegationCurrentStatus, getDaysRemainingInDelegation } from '../utils/delegationUtils';
 import { getPrioritySlaHours } from '../utils/slaAndRisk';
-import { mockUsers, mockDepartments } from '../data/mockData';
+import { formatDisplayDateTime, formatDisplayDate } from '../utils/timezone';
+import { mockUsers, mockDepartments } from '../data/db';
 import {
   UserCheck,
   CheckCircle2,
@@ -285,7 +286,7 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
                 <strong>{delegationCtx.effectiveDepartmentName}</strong> during their {delegationCtx.activeDelegation.reason}.
               </p>
               <div className="flex items-center space-x-3 mt-1 text-[11px] text-amber-800 font-medium">
-                <span>📅 Time Frame: <strong>{delegationCtx.activeDelegation.startDate.split(' ')[0]}</strong> to <strong>{delegationCtx.activeDelegation.endDate.split(' ')[0]}</strong></span>
+                <span>📅 Time Frame: <strong>{formatDisplayDate(delegationCtx.activeDelegation.startDate)}</strong> to <strong>{formatDisplayDate(delegationCtx.activeDelegation.endDate)}</strong></span>
                 <span>⏳ Time Remaining: <strong>{getDaysRemainingInDelegation(delegationCtx.activeDelegation)}</strong></span>
               </div>
             </div>
@@ -309,14 +310,12 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
               </div>
               <p className="text-slate-600 mt-0.5">
                 Your temporary approval delegation for <strong>{delegationCtx.effectiveDepartmentName}</strong> expired on{' '}
-                <strong>{delegationCtx.expiredDelegations[0]?.endDate.split(' ')[0]}</strong>. As per compliance rules, you have <strong>Read-Only Access</strong> to inspect requests, attachments, and audit history. Approval decision buttons are disabled.
+                <strong>{formatDisplayDate(delegationCtx.expiredDelegations[0]?.endDate)}</strong>.You have <strong>Read-Only Access</strong> to inspect requests, attachments, and audit history.
               </p>
             </div>
           </div>
           <div className="shrink-0 text-right">
-            <span className="text-[11px] font-mono font-bold text-slate-600 bg-slate-200/80 px-3 py-1.5 rounded-lg border border-slate-300 block text-center">
-              Read-Only Archive Access
-            </span>
+            
           </div>
         </div>
       )}
@@ -518,7 +517,7 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
                             </span>
                           </div>
                           <p className="font-mono text-xs font-bold text-slate-900 mt-0.5">
-                            📅 {delegation.startDate.split(' ')[0]} → {delegation.endDate.split(' ')[0]}
+                            📅 {formatDisplayDate(delegation.startDate)} → {formatDisplayDate(delegation.endDate)}
                           </p>
                         </div>
 
@@ -533,7 +532,7 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
                       {/* Action Bar */}
                       {isOfficialHod && (
                         <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
-                          <span className="text-[10px] text-slate-400">Created: {delegation.createdAt}</span>
+                          <span className="text-[10px] text-slate-400">Created: {formatDisplayDateTime(delegation.createdAt)}</span>
                           <button
                             onClick={() => setRevokingDelegationId(delegation.id)}
                             className="px-3 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1"
@@ -602,7 +601,7 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
               {displayedQueue.length === 0 ? (
                 <div className="p-8 text-center bg-white rounded-2xl border border-slate-200 text-slate-400 space-y-2">
                   <CheckCircle2 className="w-10 h-10 mx-auto text-slate-300" />
-                  <p className="text-xs font-semibold text-slate-600">No change requests found in this view.</p>
+                  <p className="text-xs font-semibold text-slate-600">No IT Request found.</p>
                 </div>
               ) : (
                 displayedQueue.map((cr) => {
@@ -748,7 +747,7 @@ export const HodQueueView: React.FC<HodQueueViewProps> = ({
                   <h2 className="text-lg font-bold text-slate-900 mt-2">{selectedCr.title}</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Requested by <strong>{selectedCr.requesterName}</strong> ({selectedCr.departmentName}) • Submitted on{' '}
-                    {selectedCr.createdAt}
+                    {formatDisplayDateTime(selectedCr.createdAt)}
                   </p>
                 </div>
               </div>

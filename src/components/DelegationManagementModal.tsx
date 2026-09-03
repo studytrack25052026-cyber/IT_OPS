@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { UserProfile, Department, TemporaryApproverDelegation, DelegationReason } from '../types';
-import { mockDepartments } from '../data/mockData';
+import { mockDepartments } from '../data/db';
 import {
   UserCheck,
   Calendar,

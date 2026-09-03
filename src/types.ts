@@ -1,4 +1,4 @@
-export type UserRole = 'Requester' | 'Department HOD' | 'IT Admin' | 'Software Developer' | 'System Admin';
+export type UserRole = 'Requester' | 'Department HOD' | 'IT Helpdesk' | 'IT Admin' | 'Software Developer' | 'System Admin' | string;
 
 export type TicketCategory =
   | 'Hardware'
@@ -88,34 +88,34 @@ export interface IssueTypeMaster {
 export interface ApplicationModuleMaster {
   id: string;
   applicationId: string; // References ApplicationAssetMaster (e.g. app-pcs-net)
-  applicationName: string;
+  applicationName?: string;
   code: string; // e.g. 107_PCS.NET, 101_APMS.NET, 104_E-INVOICE.NET
   name: string;
   description?: string;
   leadDeveloper?: string;
-  displayOrder: number;
+  displayOrder?: number;
   isActive: boolean;
 }
 
 export interface ApplicationSubFunctionMaster {
   id: string;
   moduleId: string; // References ApplicationModuleMaster
-  moduleCode: string;
+  moduleCode?: string;
   code: string;
   name: string; // e.g. CD2 Wire Operations, Spool Management
   description?: string;
-  displayOrder: number;
+  displayOrder?: number;
   isActive: boolean;
 }
 
 export interface ApplicationProcessMaster {
   id: string;
   subFunctionId: string; // References ApplicationSubFunctionMaster
-  subFunctionName: string;
+  subFunctionName?: string;
   code: string;
   name: string; // e.g. CD2 Issue Case ID, Spool Trace Label Issue
   description?: string;
-  displayOrder: number;
+  displayOrder?: number;
   isActive: boolean;
 }
 
@@ -196,11 +196,98 @@ export interface UserProfile {
   registeredAt?: string;
 }
 
+export interface CustomRolePermissions {
+  canViewMyRequests: boolean;
+  canViewHodQueue: boolean;
+  canViewItAdminWorkspace: boolean;
+  canViewDeveloperBoard: boolean;
+  canViewClosedCases: boolean;
+  canViewReports: boolean;
+  canViewAdminHub: boolean;
+  canViewEmailHub: boolean;
+
+  canApproveHodStage: boolean;
+  canTriageAndAssignDevs: boolean;
+  canReturnToRequester: boolean;
+  canDirectModifyCatalog: boolean;
+  canVerifyRelease: boolean;
+  canReopenCases: boolean;
+  canManageUsers: boolean;
+}
+
+export interface CustomRoleWorkflowRouting {
+  receivesHodReview: boolean;
+  receivesItAdminReview: boolean;
+  canBeAssignedAsDeveloper: boolean;
+  receivesCriticalEscalations: boolean;
+}
+
+export interface CustomRoleEmailSubscriptions {
+  notifyNewSubmissions: boolean;
+  notifyClarificationReplies: boolean;
+  notifyStatusTransitions: boolean;
+  notifyReleaseVerifications: boolean;
+  notifyUserRegistrations: boolean;
+  notifyDelegations: boolean;
+}
+
+export interface CustomRoleDefinition {
+  id: string;
+  roleName: string;
+  archetype: 'Requester' | 'Department HOD' | 'IT Helpdesk' | 'IT Admin' | 'Software Developer' | 'System Admin' | 'Auditor' | 'Custom';
+  description: string;
+  isSystemRole: boolean;
+  permissions: CustomRolePermissions;
+  workflowRouting: CustomRoleWorkflowRouting;
+  emailSubscriptions: CustomRoleEmailSubscriptions;
+  userCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface SmtpConfig {
   smtpServer: string;
   smtpPort: number;
   fromAddress: string;
   fromName: string;
+  authRequired?: boolean;
+  authUser?: string;
+  authPass?: string;
+  useTls?: boolean;
+}
+
+export interface EmailTemplateVariable {
+  key: string;
+  label: string;
+  exampleValue: string;
+  description: string;
+}
+
+export interface EmailTemplateDefinition {
+  id: string;
+  category: 'cr_workflow' | 'user_account' | 'governance';
+  eventName: string;
+  description: string;
+  subjectTemplate: string;
+  recipientDescription: string;
+  defaultRecipientRole?: string;
+  variables: EmailTemplateVariable[];
+  bodyHtml: string;
+  enabled: boolean;
+  lastUpdated?: string;
+  updatedBy?: string;
+}
+
+export interface SmtpTestResult {
+  success: boolean;
+  message: string;
+  latencyMs: number;
+  serverHost: string;
+  serverPort: number;
+  testedAt: string;
+  protocolResponse?: string;
+  smtpLog?: string[];
+  errorCode?: string;
 }
 
 export interface EmailNotificationLog {
@@ -263,6 +350,8 @@ export interface ApprovalHistoryEntry {
     | 'Rejected'
     | 'Sent Back'
     | 'Returned for Clarification'
+    | 'Reminder Sent (Chase Policy)'
+    | 'Auto-Closed (No Response)'
     | 'Assigned'
     | 'Status Update'
     | 'Verified'
@@ -278,7 +367,7 @@ export interface ApprovalHistoryEntry {
 }
 
 export interface ChangeRequest {
-  id: string; // e.g. PCS-CR-2026-00001 or IT-REQ-2026-00001
+  id: string; // e.g. ITO-CR-2026-00001 or IT-REQ-2026-00001
   title: string;
   requesterId: string;
   requesterName: string;
@@ -322,8 +411,9 @@ export interface ChangeRequest {
   status: RequestStatus;
   hodApprovedAt?: string;
   hodApprovedBy?: string;
-  returnedByRole?: 'Department HOD' | 'IT Admin' | 'Software Developer' | 'System Admin';
+  returnedByRole?: 'Department HOD' | 'IT Helpdesk' | 'IT Admin' | 'Software Developer' | 'System Admin';
   itClarificationRequested?: boolean;
+  clarificationReply?: string;
   assignedDeveloperId?: string;
   assignedDeveloperName?: string;
   implementationNotes?: string;
@@ -334,7 +424,7 @@ export interface ChangeRequest {
   // Rejection & Reopen Tracking
   rejectedByUserId?: string;
   rejectedByName?: string;
-  rejectedByRole?: 'IT Admin' | 'System Admin' | 'Software Developer' | 'Department HOD' | 'Acting Department HOD' | string;
+  rejectedByRole?: 'IT Helpdesk' | 'IT Admin' | 'System Admin' | 'Software Developer' | 'Department HOD' | 'Acting Department HOD' | string;
   rejectedAt?: string;
   rejectionReason?: string;
   reopenedByUserId?: string;
@@ -344,6 +434,16 @@ export interface ChangeRequest {
   approvalHistory: ApprovalHistoryEntry[];
   targetCompletionDate?: string;
   slaTargetHours?: number;
+  // SLA Clock Pause & 3-Stage Chase Policy Tracking
+  slaPausedAt?: string;
+  totalSlaPausedHours?: number;
+  reminderCount?: number; // 0, 1, 2, 3 (3-Strike Rule)
+  lastReminderSentAt?: string;
+  lastReminderStage?: 1 | 2 | 3;
+  autoClosureWarnedAt?: string;
+  isAutoClosedInactive?: boolean;
+  withdrawnAt?: string;
+  withdrawnReason?: string;
   riskAssessment?: {
     riskScore: number;
     riskLevel: 'Low' | 'Medium' | 'High' | 'Severe';
@@ -405,4 +505,28 @@ export interface CodeFile {
   category: 'Program & Config' | 'Database SQL (RLS)' | 'EF Core Models' | 'Controllers' | 'Razor Views' | 'Documentation';
   language: 'csharp' | 'sql' | 'json' | 'razor' | 'markdown';
   content: string;
+}
+
+export interface SystemTurnaroundMetrics {
+  avgHodClearanceDays: number;
+  hodClearanceDisplay: string;
+  hodSlaCompliancePercent: number;
+  hodSlaComplianceDisplay: string;
+  hodEvaluatedCount: number;
+  avgItDevCycleDays: number;
+  itDevCycleDisplay: string;
+  itDevSlaCompliancePercent: number;
+  itDevSlaComplianceDisplay: string;
+  itEvaluatedCount: number;
+  totalClosedCases: number;
+  completedCount: number;
+  rejectedCount: number;
+  totalCases: number;
+  verificationRatePercent: number;
+  verificationDisplay: string;
+  priorityDistribution: Record<PriorityLevel | string, number>;
+  statusDistribution: Record<string, number>;
+  avgOverallResolutionDays: number;
+  calculatedAt: string;
+  source: 'postgresql_engine' | 'fallback_computed';
 }

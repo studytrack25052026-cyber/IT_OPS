@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { UserRole, UserProfile, NotificationItem, TemporaryApproverDelegation } from '../types';
+import { UserRole, UserProfile, NotificationItem, TemporaryApproverDelegation, CustomRoleDefinition } from '../types';
 import { getUserDelegationContext } from '../utils/delegationUtils';
+import { hasRolePermission } from '../utils/rbac';
 import {
   LayoutDashboard,
   FileText,
@@ -34,6 +35,7 @@ interface SidebarProps {
   notifications: NotificationItem[];
   onMarkNotificationRead: (id: string) => void;
   onRequestClick: (crId: string) => void;
+  onOpenNotificationsModal?: () => void;
   pendingHodCount: number;
   pendingItCount: number;
   assignedDevCount: number;
@@ -43,6 +45,7 @@ interface SidebarProps {
   emailCount: number;
   users?: UserProfile[];
   delegations?: TemporaryApproverDelegation[];
+  customRoles?: CustomRoleDefinition[];
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -53,6 +56,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   notifications,
   onMarkNotificationRead,
   onRequestClick,
+  onOpenNotificationsModal,
   pendingHodCount,
   pendingItCount,
   assignedDevCount,
@@ -62,6 +66,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   emailCount,
   users: propUsers,
   delegations = [],
+  customRoles = [],
 }) => {
   const [showNotifMenu, setShowNotifMenu] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -114,6 +119,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
     ? 'bg-amber-600 text-white font-bold'
     : 'bg-slate-700 text-slate-300 font-mono text-[9px]';
 
+  // Dynamic capability checks from Custom Roles & Automated Governance Matrix
+  const canViewHodQueue = isHodDirect || delegationCtx.canAccessHodQueue || hasRolePermission(currentUser.role, 'canViewHodQueue', customRoles);
+  const canViewItAdminWorkspace = hasRolePermission(currentUser.role, 'canViewItAdminWorkspace', customRoles);
+  const canViewDeveloperBoard = hasRolePermission(currentUser.role, 'canViewDeveloperBoard', customRoles);
+  const canViewClosedCases = hasRolePermission(currentUser.role, 'canViewClosedCases', customRoles);
+  const canViewReports = hasRolePermission(currentUser.role, 'canViewReports', customRoles);
+  const canViewAdminHub = hasRolePermission(currentUser.role, 'canViewAdminHub', customRoles);
+  const canViewEmailHub = hasRolePermission(currentUser.role, 'canViewEmailHub', customRoles);
+
   const navItems = [
     {
       id: 'dashboard',
@@ -133,7 +147,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: UserCheck,
       badge: hodBadge,
       badgeColor: hodBadgeColor,
-      show: isHodDirect || delegationCtx.canAccessHodQueue,
+      show: canViewHodQueue,
     },
     {
       id: 'itadmin',
@@ -141,7 +155,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Code2,
       badge: pendingItCount > 0 ? pendingItCount : undefined,
       badgeColor: 'bg-blue-500 text-white',
-      show: currentUser.role === 'IT Admin' || currentUser.role === 'System Admin',
+      show: canViewItAdminWorkspace,
     },
     {
       id: 'dev',
@@ -149,7 +163,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Kanban,
       badge: assignedDevCount > 0 ? assignedDevCount : undefined,
       badgeColor: 'bg-emerald-500 text-white',
-      show: currentUser.role === 'Software Developer' || currentUser.role === 'IT Admin' || currentUser.role === 'System Admin',
+      show: canViewDeveloperBoard,
     },
     {
       id: 'closed',
@@ -157,13 +171,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Archive,
       badge: closedCasesCount > 0 ? closedCasesCount : undefined,
       badgeColor: 'bg-slate-700 text-slate-200',
-      show: currentUser.role === 'Software Developer' || currentUser.role === 'IT Admin' || currentUser.role === 'System Admin',
+      show: canViewClosedCases,
     },
     {
       id: 'reports',
       label: 'Reports & Export',
       icon: BarChart3,
-      show: true,
+      show: canViewReports,
     },
     {
       id: 'howtouse',
@@ -175,7 +189,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       id: 'admin',
       label: 'System Administration',
       icon: Shield,
-      show: currentUser.role === 'System Admin' || currentUser.role === 'IT Admin',
+      show: canViewAdminHub,
     },
   ];
 
@@ -318,24 +332,34 @@ export const Sidebar: React.FC<SidebarProps> = ({
               })}
           </div>
 
-          {/* System Utilities / Outbox (Admin Accounts) */}
-          {(currentUser.role === 'System Admin' || currentUser.role === 'IT Admin') && (
+          {/* Email & SMTP Hub (Dynamic Governance Matrix Permission) */}
+          {canViewEmailHub && (
             <div className="pt-2 border-t border-white/10 space-y-1">
               <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                System Utilities
+                Email Communications
               </div>
               <button
                 onClick={() => {
                   onOpenSmtpConsole();
                   setMobileOpen(false);
                 }}
-                className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/50 text-xs text-blue-200 transition-colors cursor-pointer"
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-colors cursor-pointer ${
+                  activeAppTab === 'emails'
+                    ? 'bg-blue-600 text-white shadow-sm font-bold'
+                    : 'bg-slate-800/60 hover:bg-slate-800 border border-slate-700/50 text-blue-200'
+                }`}
               >
                 <div className="flex items-center space-x-2.5">
-                  <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
-                  <span className="font-semibold">SMTP Outbox</span>
+                  <Mail className={`w-4 h-4 shrink-0 ${activeAppTab === 'emails' ? 'text-white' : 'text-sky-400'}`} />
+                  <span className="font-semibold">Email & SMTP Hub</span>
                 </div>
-                <span className="bg-cyan-500 text-slate-950 text-[10px] font-extrabold px-1.5 py-0.2 rounded-full">
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                    activeAppTab === 'emails'
+                      ? 'bg-white text-blue-700'
+                      : 'bg-sky-500/20 border border-sky-400/40 text-sky-300'
+                  }`}
+                >
                   {emailCount} sent
                 </span>
               </button>
@@ -349,7 +373,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="relative" ref={notifMenuRef}>
             <button
               onClick={() => {
-                setShowNotifMenu(!showNotifMenu);
+                if (onOpenNotificationsModal) {
+                  onOpenNotificationsModal();
+                  setMobileOpen(false);
+                } else {
+                  setShowNotifMenu(!showNotifMenu);
+                }
               }}
               className={`w-full flex items-center justify-between p-2 rounded-xl border text-xs transition-colors cursor-pointer ${
                 unreadNotifs.length > 0
@@ -450,12 +479,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   <div className="mt-1 flex items-center gap-1 text-[9px] bg-amber-950/80 text-amber-300 px-1.5 py-0.5 rounded border border-amber-700/60 font-semibold truncate">
                     <Zap className="w-2.5 h-2.5 shrink-0 text-amber-400 fill-amber-400" />
                     <span className="truncate">Acting HOD ({delegationCtx.effectiveDepartmentName})</span>
-                  </div>
-                )}
-                {delegationCtx.hasExpiredDelegation && !delegationCtx.hasActiveDelegation && (
-                  <div className="mt-1 flex items-center gap-1 text-[9px] bg-slate-900 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700 font-mono truncate">
-                    <Lock className="w-2.5 h-2.5 shrink-0 text-slate-400" />
-                    <span className="truncate">HOD Archive (Read-Only)</span>
                   </div>
                 )}
               </div>

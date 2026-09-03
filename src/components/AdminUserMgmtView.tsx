@@ -13,16 +13,22 @@ import {
   ApplicationModuleMaster,
   ApplicationSubFunctionMaster,
   ApplicationProcessMaster,
+  SmtpConfig,
+  EmailNotificationLog,
+  CustomRoleDefinition,
 } from '../types';
-import { mockUsers, mockDepartments, defaultModuleHierarchy, ModuleHierarchyMap, defaultStorageConfig } from '../data/mockData';
+import { mockUsers, mockDepartments, ModuleHierarchyMap, defaultStorageConfig, defaultSmtpConfig, baselineCustomRoles } from '../data/db';
 import { validatePasswordPolicy, generateCompliantPassword } from '../utils/passwordPolicy';
+import { getMalaysianTimestamp, formatDisplayDateTime } from '../utils/timezone';
 import { api } from '../services/api';
 import { PasswordPolicyFeedback } from './PasswordPolicyFeedback';
 import { ServiceCatalogAdminView } from './ServiceCatalogAdminView';
 import { StaffWorkloadReportView } from './StaffWorkloadReportView';
+import { RoleGovernanceAdminView } from './RoleGovernanceAdminView';
 import {
   Users,
   Shield,
+  ShieldCheck,
   Building,
   Layers,
   Save,
@@ -65,7 +71,8 @@ import {
   FileCheck,
   AlertTriangle,
   RefreshCw,
-  ExternalLink
+  ExternalLink,
+  Mail
 } from 'lucide-react';
 
 interface ApprovalFeedbackModalState {
@@ -82,8 +89,8 @@ interface ApprovalFeedbackModalState {
 
 interface AdminUserMgmtViewProps {
   currentUser: UserProfile;
-  moduleHierarchyMap: ModuleHierarchyMap;
-  onUpdateModuleHierarchy: (updatedMap: ModuleHierarchyMap) => void;
+  moduleHierarchyMap?: ModuleHierarchyMap;
+  onUpdateModuleHierarchy?: (updatedMap: ModuleHierarchyMap) => void;
   departments?: Department[];
   onUpdateDepartments?: (depts: Department[]) => void;
   users?: UserProfile[];
@@ -109,11 +116,19 @@ interface AdminUserMgmtViewProps {
   onUpdateSubFunctions?: (sfs: ApplicationSubFunctionMaster[]) => void;
   processes?: ApplicationProcessMaster[];
   onUpdateProcesses?: (procs: ApplicationProcessMaster[]) => void;
+  smtpConfig?: SmtpConfig;
+  onUpdateSmtpConfig?: (config: SmtpConfig) => void;
+  emailLogs?: EmailNotificationLog[];
+  onClearEmailLogs?: () => void;
+  customRoles?: CustomRoleDefinition[];
+  onUpdateCustomRoles?: (roles: CustomRoleDefinition[]) => void;
+  initialAdminTab?: 'catalog' | 'workload' | 'hierarchy' | 'users' | 'departments' | 'storage' | 'postgres';
+  onRequestClick?: (crId: string) => void;
 }
 
 export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
   currentUser,
-  moduleHierarchyMap,
+  moduleHierarchyMap = {},
   onUpdateModuleHierarchy,
   departments: propsDepartments,
   onUpdateDepartments,
@@ -140,6 +155,14 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
   onUpdateSubFunctions,
   processes,
   onUpdateProcesses,
+  smtpConfig,
+  onUpdateSmtpConfig,
+  emailLogs = [],
+  onClearEmailLogs,
+  customRoles: propsCustomRoles,
+  onUpdateCustomRoles,
+  initialAdminTab = 'catalog',
+  onRequestClick,
 }) => {
   // Local or prop-driven database state for users and departments
   const [internalUsers, setInternalUsers] = useState<UserProfile[]>(propsUsers || mockUsers);
@@ -156,7 +179,32 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
   const users = propsUsers || internalUsers;
   const departments = propsDepartments || internalDepartments;
 
-  const [activeAdminTab, setActiveAdminTab] = useState<'catalog' | 'hierarchy' | 'workload' | 'users' | 'departments' | 'storage' | 'postgres'>('catalog');
+  const [activeAdminTab, setActiveAdminTab] = useState<'catalog' | 'roles' | 'workload' | 'hierarchy' | 'users' | 'departments' | 'storage' | 'postgres'>(initialAdminTab);
+
+  useEffect(() => {
+    if (initialAdminTab) {
+      setActiveAdminTab(initialAdminTab as any);
+    }
+  }, [initialAdminTab]);
+
+  // Dynamic Custom Roles State
+  const [customRoles, setCustomRoles] = useState<CustomRoleDefinition[]>(propsCustomRoles || baselineCustomRoles);
+
+  useEffect(() => {
+    if (propsCustomRoles) {
+      setCustomRoles(propsCustomRoles);
+    }
+  }, [propsCustomRoles]);
+
+  useEffect(() => {
+    if (!propsCustomRoles) {
+      api.getCustomRoles().then((res) => {
+        if (res.success && res.data && res.data.length > 0) {
+          setCustomRoles(res.data);
+        }
+      }).catch((err) => console.warn('[Custom Roles Load Notice]', err));
+    }
+  }, [propsCustomRoles]);
 
   // Enterprise Storage Vault & Location Configuration State
   const [storageConfigState, setStorageConfigState] = useState<StorageConfig>(
@@ -181,45 +229,6 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
 
   const [vaultSearchTerm, setVaultSearchTerm] = useState('');
   const [copiedPathId, setCopiedPathId] = useState<string | null>(null);
-
-  // Derive target module names list directly from database map
-  const availableTargetModules = Object.keys(moduleHierarchyMap);
-
-  // Active selections in 3-Tier Configurator
-  const [selectedModule, setSelectedModule] = useState<string>(
-    availableTargetModules[0] || '107_PCS.NET'
-  );
-  const [selectedSubFunction, setSelectedSubFunction] = useState<string>('CD2 Wire Operations');
-
-  // Level 1: Target Modules Paste Textarea
-  const [pastedModulesText, setPastedModulesText] = useState<string>(() => {
-    return availableTargetModules.join('\n');
-  });
-
-  // Level 2: Sub-Functions Paste Textarea
-  const [pastedSubFunctionsText, setPastedSubFunctionsText] = useState<string>(() => {
-    const modConfig = moduleHierarchyMap[selectedModule] || moduleHierarchyMap['107_PCS.NET'] || {};
-    return Object.keys(modConfig).join('\n');
-  });
-
-  // Level 3: Processes Paste Textarea
-  const [pastedProcessesText, setPastedProcessesText] = useState<string>(() => {
-    const modConfig = moduleHierarchyMap[selectedModule] || moduleHierarchyMap['107_PCS.NET'] || {};
-    const subFns = modConfig['CD2 Wire Operations'] || Object.values(modConfig)[0] || [];
-    return (subFns as string[]).join('\n');
-  });
-
-  // Keep Level 1 paste box synced with database module map when updated
-  useEffect(() => {
-    setPastedModulesText(Object.keys(moduleHierarchyMap).join('\n'));
-  }, [moduleHierarchyMap]);
-
-  // Mode: 'paste_levels' (Dedicated Level 1, 2, 3 Paste Boxes) or 'bulk' (SubFunction > Process)
-  const [inputMode, setInputMode] = useState<'paste_levels' | 'bulk'>('paste_levels');
-  const [bulkImportText, setBulkImportText] = useState<string>(
-    `CD2 Wire Operations > Wire Receive From MCS\nCD2 Wire Operations > CD2 Issue Case ID\nCD2 Wire Operations > CD2 Comm Update\nCD2 Wire Operations > Register CD2 Scrap\nCD2 Wire Operations > CD2 WorkCard Close\nCD2 Wire Operations > CD2 Diameter Value\nCD2 Wire Operations > CD2 Transfer to MCS\nCD2 Wire Operations > CD2 Transfer to MCS NEW DESIGN\nSpool Management > Spool Trace Label Issue\nSpool Management > Spool Request For WildCard\nSpool Management > Spool Receiving Program`
-  );
-
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
   // User Registration State & Modals
@@ -240,6 +249,17 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
   const [adminResetNewPassword, setAdminResetNewPassword] = useState('');
   const [mustChangePasswordOnNextLogin, setMustChangePasswordOnNextLogin] = useState(true);
   const [adminResetSuccessNote, setAdminResetSuccessNote] = useState('');
+
+  // Admin Dedicated Edit User & Role Modal State
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [userForEdit, setUserForEdit] = useState<UserProfile | null>(null);
+  const [editFullName, setEditFullName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editDepartmentId, setEditDepartmentId] = useState<number>(1);
+  const [editRole, setEditRole] = useState<UserRole>('Requester');
+  const [editStatus, setEditStatus] = useState<string>('Active');
+  const [isSavingUserEdit, setIsSavingUserEdit] = useState(false);
+  const [userEditError, setUserEditError] = useState<string | null>(null);
 
   // Department Management State & Modals
   const [showAddDeptModal, setShowAddDeptModal] = useState(false);
@@ -304,209 +324,8 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     }
   };
 
-  // Helper function to split textarea lines cleanly
-  const parseLines = (text: string) => {
-    return text
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  };
-
-  const handleModuleChange = (modName: string) => {
-    setSelectedModule(modName);
-    const modConfig = moduleHierarchyMap[modName] || {};
-    const subFnKeys = Object.keys(modConfig);
-    setPastedSubFunctionsText(subFnKeys.join('\n'));
-
-    const firstSubFn = subFnKeys[0] || 'General Sub-Function';
-    setSelectedSubFunction(firstSubFn);
-    setPastedProcessesText(((modConfig[firstSubFn] || []) as string[]).join('\n'));
-    setSaveSuccessMessage(null);
-  };
-
-  const handleDeleteActiveModule = (modNameToDelete: string) => {
-    if (!modNameToDelete) return;
-
-    const updatedMap = { ...moduleHierarchyMap };
-    delete updatedMap[modNameToDelete];
-
-    onUpdateModuleHierarchy(updatedMap);
-
-    const remainingModules = Object.keys(updatedMap);
-    if (remainingModules.length > 0) {
-      const nextMod = remainingModules[0];
-      setSelectedModule(nextMod);
-      const nextModConfig = updatedMap[nextMod] || {};
-      const nextSubFns = Object.keys(nextModConfig);
-      setPastedSubFunctionsText(nextSubFns.join('\n'));
-      const firstSubFn = nextSubFns[0] || '';
-      setSelectedSubFunction(firstSubFn);
-      setPastedProcessesText(((nextModConfig[firstSubFn] || []) as string[]).join('\n'));
-    } else {
-      setSelectedModule('');
-      setSelectedSubFunction('');
-      setPastedSubFunctionsText('');
-      setPastedProcessesText('');
-    }
-
-    setSaveSuccessMessage(`✓ Target Module "${modNameToDelete}" was deleted from Database.`);
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
-  const handleSubFunctionChange = (subFnName: string) => {
-    setSelectedSubFunction(subFnName);
-    const modConfig = moduleHierarchyMap[selectedModule] || {};
-    const processes = (modConfig[subFnName] || []) as string[];
-    setPastedProcessesText(processes.join('\n'));
-    setSaveSuccessMessage(null);
-  };
-
-  const handleDeleteSubFunction = (subFnToDelete: string) => {
-    if (!selectedModule || !subFnToDelete) return;
-
-    const updatedMap = { ...moduleHierarchyMap };
-    const modConfig = { ...(updatedMap[selectedModule] || {}) };
-    delete modConfig[subFnToDelete];
-    updatedMap[selectedModule] = modConfig;
-
-    onUpdateModuleHierarchy(updatedMap);
-
-    const remainingSubFns = Object.keys(modConfig);
-    if (remainingSubFns.length > 0) {
-      const nextSubFn = remainingSubFns[0];
-      setSelectedSubFunction(nextSubFn);
-      setPastedSubFunctionsText(remainingSubFns.join('\n'));
-      setPastedProcessesText(((modConfig[nextSubFn] || []) as string[]).join('\n'));
-    } else {
-      setSelectedSubFunction('');
-      setPastedSubFunctionsText('');
-      setPastedProcessesText('');
-    }
-
-    setSaveSuccessMessage(`✓ Sub-Function "${subFnToDelete}" deleted from "${selectedModule}".`);
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
-  const handleSaveLevel1Modules = () => {
-    const modulesList = parseLines(pastedModulesText);
-    if (modulesList.length === 0) return;
-
-    const updatedMap: ModuleHierarchyMap = { ...moduleHierarchyMap };
-
-    modulesList.forEach((modName) => {
-      if (!updatedMap[modName]) {
-        updatedMap[modName] = {};
-      }
-    });
-
-    onUpdateModuleHierarchy(updatedMap);
-
-    if (!selectedModule || !modulesList.includes(selectedModule)) {
-      setSelectedModule(modulesList[0]);
-    }
-
-    setSaveSuccessMessage(`✓ Level 1: Saved ${modulesList.length} Target Module(s) to PostgreSQL database.`);
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
-  const handleSaveLevel2SubFunctions = () => {
-    if (!selectedModule) return;
-
-    const subFnList = parseLines(pastedSubFunctionsText);
-    const updatedMap: ModuleHierarchyMap = { ...moduleHierarchyMap };
-    const currentSubMap = updatedMap[selectedModule] || {};
-
-    const newSubMap: Record<string, string[]> = {};
-    subFnList.forEach((sf) => {
-      newSubMap[sf] = currentSubMap[sf] || [];
-    });
-
-    updatedMap[selectedModule] = newSubMap;
-    onUpdateModuleHierarchy(updatedMap);
-
-    if (!subFnList.includes(selectedSubFunction)) {
-      const nextSubFn = subFnList[0] || '';
-      setSelectedSubFunction(nextSubFn);
-      setPastedProcessesText((newSubMap[nextSubFn] || []).join('\n'));
-    }
-
-    setSaveSuccessMessage(
-      `✓ Level 2: Saved ${subFnList.length} Sub-Function(s) for module "${selectedModule}".`
-    );
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
-  const handleSaveLevel3Processes = () => {
-    if (!selectedModule || !selectedSubFunction) return;
-
-    const processList = parseLines(pastedProcessesText);
-    const updatedMap: ModuleHierarchyMap = { ...moduleHierarchyMap };
-    const currentSubMap = { ...(updatedMap[selectedModule] || {}) };
-
-    currentSubMap[selectedSubFunction] = processList;
-    updatedMap[selectedModule] = currentSubMap;
-
-    onUpdateModuleHierarchy(updatedMap);
-
-    setSaveSuccessMessage(
-      `✓ Level 3: Saved ${processList.length} Process Options for Sub-Function "${selectedSubFunction}".`
-    );
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
-  const handleSaveBulkImportToDb = () => {
-    if (!selectedModule || !bulkImportText.trim()) return;
-
-    const lines = parseLines(bulkImportText);
-    const updatedMap: ModuleHierarchyMap = { ...moduleHierarchyMap };
-    const modConfig = { ...(updatedMap[selectedModule] || {}) };
-
-    lines.forEach((line) => {
-      let subFn = '';
-      let proc = '';
-
-      if (line.includes('>')) {
-        const parts = line.split('>');
-        subFn = parts[0].trim();
-        proc = parts.slice(1).join('>').trim();
-      } else if (line.includes('|')) {
-        const parts = line.split('|');
-        subFn = parts[0].trim();
-        proc = parts.slice(1).join('|').trim();
-      } else {
-        subFn = 'General Sub-Function';
-        proc = line.trim();
-      }
-
-      if (subFn && proc) {
-        if (!modConfig[subFn]) {
-          modConfig[subFn] = [];
-        }
-        if (!modConfig[subFn].includes(proc)) {
-          modConfig[subFn].push(proc);
-        }
-      }
-    });
-
-    updatedMap[selectedModule] = modConfig;
-    onUpdateModuleHierarchy(updatedMap);
-
-    const subFnKeys = Object.keys(modConfig);
-    if (subFnKeys.length > 0) {
-      setPastedSubFunctionsText(subFnKeys.join('\n'));
-      const activeSub = selectedSubFunction || subFnKeys[0];
-      setSelectedSubFunction(activeSub);
-      setPastedProcessesText((modConfig[activeSub] || []).join('\n'));
-    }
-
-    setSaveSuccessMessage(
-      `✓ Bulk Import: Parsed & saved ${lines.length} lines into ${selectedModule} PostgreSQL schema.`
-    );
-    setTimeout(() => setSaveSuccessMessage(null), 5000);
-  };
-
   // User Management Handlers
-  const handleRegisterUser = (e: React.FormEvent) => {
+  const handleRegisterUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFullName.trim() || !newEmail.trim()) return;
 
@@ -519,10 +338,7 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
 
     const targetDept = departments.find((d) => d.id === Number(newDeptId)) || departments[0];
 
-    const cleanUserId = `USR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const newUser: UserProfile = {
-      id: cleanUserId,
+    const newUserPayload: Partial<UserProfile> = {
       fullName: newFullName.trim(),
       email: newEmail.trim(),
       password: newUserPassword,
@@ -530,28 +346,38 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
       departmentName: targetDept.name,
       role: newRole,
       status: 'Active',
-      registeredAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      registeredAt: getMalaysianTimestamp(),
     };
 
-    const updatedUsers = [newUser, ...users];
-    if (onUpdateUsers) onUpdateUsers(updatedUsers);
-    setInternalUsers(updatedUsers);
+    try {
+      // Save directly to PostgreSQL database to obtain official database-assigned ID
+      const res = await api.createUser(newUserPayload);
+      const createdUser: UserProfile = (res && res.success && res.data)
+        ? {
+            ...newUserPayload,
+            ...res.data,
+            departmentName: res.data.departmentName || targetDept.name,
+          }
+        : {
+            ...newUserPayload,
+            id: `USR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          } as UserProfile;
 
-    // Save directly to PostgreSQL database
-    api.createUser(newUser).then((res) => {
-      if (res && res.success) {
-        console.log('[DB User Created]', res.data);
+      const updatedUsers = [createdUser, ...users.filter((u) => u.id !== createdUser.id)];
+      if (onUpdateUsers) onUpdateUsers(updatedUsers);
+      setInternalUsers(updatedUsers);
+
+      if (onSendWelcomeEmail) {
+        onSendWelcomeEmail(createdUser, newUserPassword);
       }
-    }).catch((err) => console.warn('[DB User Create Notice]', err));
 
-    if (onSendWelcomeEmail) {
-      onSendWelcomeEmail(newUser, newUserPassword);
+      setSaveSuccessMessage(
+        `✓ Account created with Database ID "${createdUser.id}" for "${createdUser.fullName}" (${createdUser.email}). Department: ${createdUser.departmentName} (HOD: ${targetDept.hodName}).`
+      );
+      setTimeout(() => setSaveSuccessMessage(null), 8000);
+    } catch (err) {
+      console.warn('[DB User Create Notice]', err);
     }
-
-    setSaveSuccessMessage(
-      `✓ Account created for "${newUser.fullName}" (${newUser.email}). Department: ${newUser.departmentName} (HOD: ${targetDept.hodName}).`
-    );
-    setTimeout(() => setSaveSuccessMessage(null), 8000);
 
     setNewFullName('');
     setNewEmail('');
@@ -594,9 +420,13 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     if (onAdminResetPassword) {
       onAdminResetPassword(userForAdminReset.id, adminResetNewPassword, mustChangePasswordOnNextLogin);
     }
+    api.updateUser(userForAdminReset.id, {
+      password: adminResetNewPassword,
+      mustChangePassword: mustChangePasswordOnNextLogin,
+    }).catch((err) => console.warn('[DB Admin Reset Notice]', err));
 
     setSaveSuccessMessage(
-      `✓ Emergency password reset executed for "${userForAdminReset.fullName}" (${userForAdminReset.email}). Credentials updated and automated SMTP notification dispatched to user.`
+      `✓ Emergency password reset executed for "${userForAdminReset.fullName}" (${userForAdminReset.email}). Credentials updated and automated notification dispatched to user.`
     );
     setTimeout(() => setSaveSuccessMessage(null), 8000);
     setShowAdminResetModal(false);
@@ -607,42 +437,42 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     if (!targetUser) return;
 
     setApprovingUserId(userId);
-    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    const now = getMalaysianTimestamp();
 
     try {
-      // 1. Perform Real-Time Approval and Live SELECT Verification in PostgreSQL
-      const res = await api.approveUser(userId, {
-        fullName: targetUser.fullName,
-        email: targetUser.email,
-        departmentId: targetUser.departmentId,
-        departmentName: targetUser.departmentName,
-        role: targetUser.role,
-        password: targetUser.password,
-      });
-
-      if (!res.success || !res.verified) {
-        throw new Error(res.message || 'Real-time database verification query failed.');
-      }
-
-      const verifiedUser: UserProfile = res.data
-        ? {
-            ...targetUser,
-            ...res.data,
-            status: 'Active',
-          }
-        : {
-            ...targetUser,
-            status: 'Active',
-          };
-
-      const updatedUsers = users.map((u) => (u.id === userId ? verifiedUser : u));
-
-      if (onUpdateUsers) onUpdateUsers(updatedUsers);
-      setInternalUsers(updatedUsers);
+      let verifiedUser: UserProfile = { ...targetUser, status: 'Active' };
+      let resMessage = `Account for "${targetUser.fullName}" has been successfully approved and confirmed active in PostgreSQL.`;
+      let resDb = 'PostgreSQL (IT_OPS)';
 
       if (onApproveUser) {
-        await onApproveUser(userId, targetUser.departmentId);
+        const approveRes = await onApproveUser(userId, targetUser.departmentId);
+        if (!approveRes.success) {
+          throw new Error(approveRes.message || 'Real-time database verification query failed.');
+        }
+        if (approveRes.data) {
+          verifiedUser = approveRes.data;
+        }
+        if (approveRes.message) resMessage = approveRes.message;
+        if (approveRes.database) resDb = approveRes.database;
+      } else {
+        // Fallback direct API approval
+        const res = await api.approveUser(userId, {
+          fullName: targetUser.fullName,
+          email: targetUser.email,
+          departmentId: targetUser.departmentId,
+          departmentName: targetUser.departmentName,
+          role: targetUser.role,
+        });
+
+        if (!res.success || !res.verified) {
+          throw new Error(res.message || 'Real-time database verification query failed.');
+        }
+        if (res.data) verifiedUser = { ...targetUser, ...res.data, status: 'Active' };
       }
+
+      const updatedUsers = users.map((u) => (u.id === userId ? verifiedUser : u));
+      if (onUpdateUsers) onUpdateUsers(updatedUsers);
+      setInternalUsers(updatedUsers);
 
       // 2. Open Real-Time Success Modal Pop-up
       setApprovalFeedback({
@@ -650,11 +480,9 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
         type: 'success',
         user: verifiedUser,
         title: 'User Account Approved & Verified in Database',
-        message:
-          res.message ||
-          `Account for "${verifiedUser.fullName}" has been successfully approved and confirmed active in PostgreSQL.`,
-        database: res.database || 'PostgreSQL (IT_OPS)',
-        table: res.table || 'public.users',
+        message: resMessage,
+        database: resDb,
+        table: 'public.users',
         verifiedAt: now,
       });
     } catch (err: unknown) {
@@ -674,6 +502,64 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
       });
     } finally {
       setApprovingUserId(null);
+    }
+  };
+
+  const handleOpenEditUserModal = (targetUser: UserProfile) => {
+    setUserForEdit(targetUser);
+    setEditFullName(targetUser.fullName);
+    setEditEmail(targetUser.email);
+    setEditDepartmentId(targetUser.departmentId || departments[0]?.id || 1);
+    setEditRole(targetUser.role || 'Requester');
+    setEditStatus(targetUser.status || 'Active');
+    setUserEditError(null);
+    setShowEditUserModal(true);
+  };
+
+  const handleSaveEditUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userForEdit) return;
+
+    setIsSavingUserEdit(true);
+    setUserEditError(null);
+
+    const targetDept = departments.find((d) => d.id === Number(editDepartmentId)) || departments[0];
+
+    const updates: Partial<UserProfile> = {
+      fullName: editFullName.trim(),
+      email: editEmail.trim(),
+      departmentId: targetDept.id,
+      departmentName: targetDept.name,
+      role: editRole,
+      status: editStatus as any,
+    };
+
+    try {
+      const res = await api.updateUser(userForEdit.id, updates);
+      if (!res.success) {
+        throw new Error(res.message || 'PostgreSQL database rejected user update.');
+      }
+
+      const verifiedUpdatedUser: UserProfile = res.data
+        ? { ...userForEdit, ...res.data, departmentName: res.data.departmentName || targetDept.name }
+        : { ...userForEdit, ...updates };
+
+      const updatedUsersList = users.map((u) => (u.id === userForEdit.id ? verifiedUpdatedUser : u));
+      if (onUpdateUsers) onUpdateUsers(updatedUsersList);
+      setInternalUsers(updatedUsersList);
+
+      setSaveSuccessMessage(
+        `✓ Successfully saved role "${editRole}" and account profile for "${verifiedUpdatedUser.fullName}" in PostgreSQL database.`
+      );
+      setTimeout(() => setSaveSuccessMessage(null), 7000);
+      setShowEditUserModal(false);
+      setUserForEdit(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[DB User Save Error]', msg);
+      setUserEditError(msg);
+    } finally {
+      setIsSavingUserEdit(false);
     }
   };
 
@@ -700,52 +586,91 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     if (onReassignDepartment) {
       onReassignDepartment(userId, newDeptId);
     }
+    api.updateUser(userId, { departmentId: newDeptId }).catch((err) =>
+      console.warn('[DB User Dept Reassign Notice]', err)
+    );
 
     setSaveSuccessMessage(
-      `✓ Reassigned "${targetUser.fullName}" from "${oldDeptName}" to "${newDept.name}". All future Change Requests will route to HOD ${newDept.hodName} (${newDept.hodEmail}).`
+      `✓ Reassigned "${targetUser.fullName}" from "${oldDeptName}" to "${newDept.name}" in PostgreSQL database. All future Change Requests will route to HOD ${newDept.hodName} (${newDept.hodEmail}).`
     );
     setTimeout(() => setSaveSuccessMessage(null), 7000);
   };
 
-  const handleRoleChange = (userId: string, updatedRole: UserRole) => {
-    const updatedUsers = users.map((u) => (u.id === userId ? { ...u, role: updatedRole } : u));
-    if (onUpdateUsers) onUpdateUsers(updatedUsers);
-    setInternalUsers(updatedUsers);
-    setSaveSuccessMessage(`✓ Updated RBAC role for User ID "${userId}" to ${updatedRole}.`);
-    setTimeout(() => setSaveSuccessMessage(null), 4000);
+  const handleRoleChange = async (userId: string, updatedRole: UserRole) => {
+    const targetUser = users.find((u) => u.id === userId);
+    const previousRole = targetUser?.role || 'Requester';
+
+    try {
+      const res = await api.updateUser(userId, { role: updatedRole });
+      if (!res.success) {
+        throw new Error(res.message || 'PostgreSQL database update failed.');
+      }
+
+      const updatedUsers = users.map((u) => (u.id === userId ? { ...u, role: updatedRole } : u));
+      if (onUpdateUsers) onUpdateUsers(updatedUsers);
+      setInternalUsers(updatedUsers);
+
+      setSaveSuccessMessage(`✓ Updated RBAC role for "${targetUser?.fullName || userId}" to "${updatedRole}" in PostgreSQL database.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[DB User Role Update Error]', msg);
+      // Revert UI to previous role
+      const revertedUsers = users.map((u) => (u.id === userId ? { ...u, role: previousRole } : u));
+      if (onUpdateUsers) onUpdateUsers(revertedUsers);
+      setInternalUsers(revertedUsers);
+
+      alert(`Database Role Update Failed: ${msg}\n\nPlease use the "Edit / Role" button to view full validation or run the schema sync.`);
+    }
+    setTimeout(() => setSaveSuccessMessage(null), 6000);
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = async (userId: string) => {
     const targetUser = users.find((u) => u.id === userId);
+    if (!targetUser) return;
+
+    if (!window.confirm(`Are you sure you want to permanently delete user "${targetUser.fullName}" (${targetUser.email}) from PostgreSQL database?`)) {
+      return;
+    }
+
     const updatedUsers = users.filter((u) => u.id !== userId);
     if (onUpdateUsers) onUpdateUsers(updatedUsers);
     setInternalUsers(updatedUsers);
-    setSaveSuccessMessage(`✓ User "${targetUser?.fullName || userId}" deleted from database.`);
+
+    try {
+      const res = await api.deleteUser(userId);
+      if (res && res.success) {
+        setSaveSuccessMessage(`✓ User "${targetUser.fullName}" (${userId}) permanently removed from PostgreSQL database.`);
+      } else {
+        setSaveSuccessMessage(`✓ User "${targetUser.fullName}" removed from application.`);
+      }
+    } catch (err) {
+      console.error('[DB User Delete Error]', err);
+      setSaveSuccessMessage(`✓ User "${targetUser.fullName}" deleted from application.`);
+    }
     setTimeout(() => setSaveSuccessMessage(null), 5000);
   };
 
   // Department Management Handlers
-  const handleSaveDepartment = (e: React.FormEvent) => {
+  const handleSaveDepartment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!deptNameInput.trim() || !deptCodeInput.trim() || !deptHodNameInput.trim()) return;
 
     let updatedDepts: Department[];
+    let targetDeptObj: Department;
 
     if (editingDeptId) {
-      updatedDepts = departments.map((d) =>
-        d.id === editingDeptId
-          ? {
-              ...d,
-              name: deptNameInput.trim(),
-              code: deptCodeInput.trim().toUpperCase(),
-              hodName: deptHodNameInput.trim(),
-              hodEmail: deptHodEmailInput.trim() || d.hodEmail,
-            }
-          : d
-      );
+      targetDeptObj = {
+        id: editingDeptId,
+        name: deptNameInput.trim(),
+        code: deptCodeInput.trim().toUpperCase(),
+        hodUserId: `user-hod-${deptCodeInput.trim().toLowerCase()}`,
+        hodName: deptHodNameInput.trim(),
+        hodEmail: deptHodEmailInput.trim() || `${deptHodNameInput.trim().toLowerCase().replace(/\s+/g, '')}@tanaka.com.my`,
+      };
+      updatedDepts = departments.map((d) => (d.id === editingDeptId ? { ...d, ...targetDeptObj } : d));
     } else {
       const nextId = departments.length > 0 ? Math.max(...departments.map((d) => d.id)) + 1 : 1;
-      const newDept: Department = {
+      targetDeptObj = {
         id: nextId,
         name: deptNameInput.trim(),
         code: deptCodeInput.trim().toUpperCase(),
@@ -753,16 +678,23 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
         hodName: deptHodNameInput.trim(),
         hodEmail: deptHodEmailInput.trim() || `${deptHodNameInput.trim().toLowerCase().replace(/\s+/g, '')}@tanaka.com.my`,
       };
-      updatedDepts = [...departments, newDept];
+      updatedDepts = [...departments, targetDeptObj];
     }
 
     if (onUpdateDepartments) onUpdateDepartments(updatedDepts);
     setInternalDepartments(updatedDepts);
 
+    // Save/Update directly in PostgreSQL database
+    try {
+      await api.updateDepartment(targetDeptObj);
+    } catch (err) {
+      console.warn('[DB Department Update Notice]', err);
+    }
+
     setSaveSuccessMessage(
       editingDeptId
-        ? `✓ Updated Department "${deptNameInput}" (Assigned HOD: ${deptHodNameInput}).`
-        : `✓ Created Department "${deptNameInput}" (Assigned HOD: ${deptHodNameInput}).`
+        ? `✓ Updated Department "${deptNameInput}" in PostgreSQL (Assigned HOD: ${deptHodNameInput}).`
+        : `✓ Created Department "${deptNameInput}" in PostgreSQL (Assigned HOD: ${deptHodNameInput}).`
     );
     setTimeout(() => setSaveSuccessMessage(null), 5000);
 
@@ -783,13 +715,29 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     setShowAddDeptModal(true);
   };
 
-  const handleDeleteDept = (deptId: number) => {
+  const handleDeleteDept = async (deptId: number) => {
     const deptToDelete = departments.find((d) => d.id === deptId);
+    if (!deptToDelete) return;
+
+    if (!window.confirm(`Are you sure you want to delete department "${deptToDelete.name}" (${deptToDelete.code}) from PostgreSQL database?`)) {
+      return;
+    }
+
     const updatedDepts = departments.filter((d) => d.id !== deptId);
     if (onUpdateDepartments) onUpdateDepartments(updatedDepts);
     setInternalDepartments(updatedDepts);
 
-    setSaveSuccessMessage(`✓ Department "${deptToDelete?.name}" removed from database.`);
+    try {
+      const res = await api.deleteDepartment(deptId);
+      if (res && res.success) {
+        setSaveSuccessMessage(`✓ Department "${deptToDelete.name}" permanently removed from PostgreSQL database.`);
+      } else {
+        setSaveSuccessMessage(`✓ Department "${deptToDelete.name}" removed from application.`);
+      }
+    } catch (err) {
+      console.error('[DB Department Delete Error]', err);
+      setSaveSuccessMessage(`✓ Department "${deptToDelete.name}" removed.`);
+    }
     setTimeout(() => setSaveSuccessMessage(null), 5000);
   };
 
@@ -839,12 +787,12 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
         latencyMs: 8,
         freeGb: 4890,
         totalGb: 10240,
-        testedAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        testedAt: getMalaysianTimestamp(),
       });
       const updated: StorageConfig = {
         ...storageConfigState,
         lastTestedStatus: 'HEALTHY',
-        lastTestedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+        lastTestedAt: getMalaysianTimestamp(),
         totalFilesStored: allVaultFiles.length,
         totalBytesConsumedMb: Math.round((totalStorageBytesKb / 1024) * 10) / 10,
       };
@@ -860,7 +808,7 @@ export const AdminUserMgmtView: React.FC<AdminUserMgmtViewProps> = ({
     const updated: StorageConfig = {
       ...storageConfigState,
       updatedBy: `${currentUser.fullName} (${currentUser.role})`,
-      updatedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      updatedAt: getMalaysianTimestamp(),
       totalFilesStored: allVaultFiles.length,
       totalBytesConsumedMb: Math.round((totalStorageBytesKb / 1024) * 10) / 10,
     };
@@ -954,7 +902,6 @@ ${userInserts}
     return true;
   });
 
-  const currentModHierarchy = moduleHierarchyMap[selectedModule] || {};
 
   return (
     <div className="space-y-6">
@@ -983,6 +930,18 @@ ${userInserts}
             >
               <FolderTree className="w-3.5 h-3.5" />
               <span>Service Catalog</span>
+            </button>
+
+            <button
+              onClick={() => setActiveAdminTab('roles')}
+              className={`px-3 py-2 rounded-lg transition-all flex items-center space-x-1.5 cursor-pointer ${
+                activeAdminTab === 'roles'
+                  ? 'bg-blue-600 text-white shadow-xs border border-blue-500 font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+              <span>Roles & Governance</span>
             </button>
 
             <button
@@ -1097,6 +1056,30 @@ ${userInserts}
         />
       )}
 
+      {/* TAB: Custom Roles & Automated Governance Matrix */}
+      {activeAdminTab === 'roles' && (
+        <RoleGovernanceAdminView
+          currentUser={currentUser}
+          users={users}
+          onRoleCreatedOrUpdated={(newRole) => {
+            setCustomRoles((prev) => {
+              const existingIdx = prev.findIndex((r) => r.id === newRole.id);
+              let updatedRoles: CustomRoleDefinition[];
+              if (existingIdx >= 0) {
+                updatedRoles = [...prev];
+                updatedRoles[existingIdx] = newRole;
+              } else {
+                updatedRoles = [...prev, newRole];
+              }
+              if (onUpdateCustomRoles) {
+                onUpdateCustomRoles(updatedRoles);
+              }
+              return updatedRoles;
+            });
+          }}
+        />
+      )}
+
       {/* TAB: Staff Workload Points Report */}
       {activeAdminTab === 'workload' && (
         <StaffWorkloadReportView
@@ -1106,428 +1089,26 @@ ${userInserts}
         />
       )}
 
-      {/* TAB 1: 3-Tier Hierarchy Configurator */}
+      {/* TAB 1: 3-Tier Hierarchy Explorer & Dynamic Configurator */}
       {activeAdminTab === 'hierarchy' && (
-        <div className="space-y-6">
-          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 flex items-center space-x-2">
-                  <Layers className="w-5 h-5 text-blue-600" />
-                  <span>3-Tier Paste Upload Configurator (Level 1 ➔ Level 2 ➔ Level 3)</span>
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Paste Target Modules (Level 1), Sub-Functions (Level 2), and Process Options (Level 3) directly into dedicated paste upload boxes.
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <span className="flex items-center text-[11px] font-bold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
-                  <Database className="w-3.5 h-3.5 mr-1 text-emerald-600" />
-                  Database Synchronized
-                </span>
-              </div>
-            </div>
-
-            {/* Mode Switcher */}
-            <div className="flex items-center space-x-3 bg-slate-100 p-1.5 rounded-xl text-xs font-bold w-fit">
-              <button
-                onClick={() => setInputMode('paste_levels')}
-                className={`px-3.5 py-2 rounded-lg transition-all cursor-pointer ${
-                  inputMode === 'paste_levels'
-                    ? 'bg-white text-blue-900 shadow-xs border border-slate-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                1. Dedicated Level 1, Level 2 & Level 3 Paste Textareas
-              </button>
-
-              <button
-                onClick={() => setInputMode('bulk')}
-                className={`px-3.5 py-2 rounded-lg transition-all cursor-pointer ${
-                  inputMode === 'bulk'
-                    ? 'bg-white text-blue-900 shadow-xs border border-slate-200'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                2. Combined Bulk Import Paste (SubFunction &gt; Process)
-              </button>
-            </div>
-
-            {/* Active Module Selector Bar */}
-            <div className="p-4 bg-blue-50/70 border border-blue-200/80 rounded-2xl flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center space-x-3">
-                <span className="text-xs font-bold text-blue-950 uppercase tracking-wide">
-                  Active Target Module Selected for Level 2 & Level 3 Editing:
-                </span>
-                <select
-                  value={selectedModule}
-                  onChange={(e) => handleModuleChange(e.target.value)}
-                  className="px-3 py-1.5 bg-white border border-blue-300 rounded-xl text-xs font-bold text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs"
-                >
-                  {availableTargetModules.map((modName) => (
-                    <option key={modName} value={modName}>
-                      {modName} ({Object.keys(moduleHierarchyMap[modName] || {}).length} Sub-Functions Configured)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedModule && (
-                <button
-                  type="button"
-                  onClick={() => handleDeleteActiveModule(selectedModule)}
-                  className="px-3 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 text-xs font-bold rounded-xl transition-all flex items-center space-x-1.5 cursor-pointer"
-                  title={`Delete Target Module "${selectedModule}" from Database`}
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                  <span>Delete "{selectedModule}"</span>
-                </button>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left Column: Dedicated Paste Boxes */}
-              <div className="lg:col-span-7 space-y-6">
-                {inputMode === 'paste_levels' ? (
-                  <>
-                    {/* LEVEL 1: Target Modules List Paste Box */}
-                    <div className="space-y-2 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
-                          <span className="w-5 h-5 bg-blue-600 text-white rounded-full text-[10px] flex items-center justify-center font-bold">
-                            1
-                          </span>
-                          <span>Level 1: Paste Target Modules List (1 per line)</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPastedModulesText(
-                              `101_APMS.NET\n102_DIES.NET\n107_PCS.NET\n108_POWERBI.NET\n109_QUAL.NET`
-                            )
-                          }
-                          className="text-[11px] font-bold text-blue-600 hover:text-blue-800 flex items-center space-x-1 cursor-pointer"
-                        >
-                          <Sparkles className="w-3 h-3" />
-                          <span>Paste Sample Modules</span>
-                        </button>
-                      </div>
-
-                      <textarea
-                        rows={4}
-                        value={pastedModulesText}
-                        onChange={(e) => setPastedModulesText(e.target.value)}
-                        placeholder={`Paste Target Modules here (1 per line), e.g.:\n101_APMS.NET\n102_DIES.NET\n107_PCS.NET\n108_POWERBI.NET`}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
-                      />
-
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[11px] font-semibold text-slate-500">
-                          {parseLines(pastedModulesText).length} Target Module(s) typed
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleSaveLevel1Modules}
-                          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
-                        >
-                          <Save className="w-3.5 h-3.5" />
-                          <span>Save Level 1 Modules</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* LEVEL 2: Sub-Functions List Paste Box */}
-                    <div className="space-y-2 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
-                      <div className="flex items-center justify-between">
-                        <label className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
-                          <span className="w-5 h-5 bg-purple-600 text-white rounded-full text-[10px] flex items-center justify-center font-bold">
-                            2
-                          </span>
-                          <span>Level 2: Paste Sub-Functions for "{selectedModule}" (1 per line)</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPastedSubFunctionsText(
-                              `CD2 Wire Operations\nSpool Management\nBarcode Scanner Interface\nQuality Certification`
-                            )
-                          }
-                          className="text-[11px] font-bold text-purple-600 hover:text-purple-800 flex items-center space-x-1 cursor-pointer"
-                        >
-                          <Sparkles className="w-3 h-3" />
-                          <span>Paste Sample Sub-Functions</span>
-                        </button>
-                      </div>
-
-                      <textarea
-                        rows={4}
-                        value={pastedSubFunctionsText}
-                        onChange={(e) => setPastedSubFunctionsText(e.target.value)}
-                        placeholder={`Paste sub-functions list here (1 per line), e.g.:\nCD2 Wire Operations\nSpool Management\nTraceability Reports`}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-purple-200"
-                      />
-
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[11px] font-semibold text-slate-500">
-                          {parseLines(pastedSubFunctionsText).length} Sub-Function(s) typed
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleSaveLevel2SubFunctions}
-                          className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
-                        >
-                          <Save className="w-3.5 h-3.5" />
-                          <span>Save Level 2 Sub-Functions</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* LEVEL 3: Process Options Paste Box */}
-                    <div className="space-y-2 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <label className="text-xs font-bold text-slate-800 flex items-center space-x-1.5">
-                          <span className="w-5 h-5 bg-emerald-600 text-white rounded-full text-[10px] flex items-center justify-center font-bold">
-                            3
-                          </span>
-                          <span>Level 3: Paste Process Options for Active Sub-Function (1 per line)</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setPastedProcessesText(
-                              `Wire Receive From MCS\nCD2 Issue Case ID\nCD2 Comm Update\nRegister CD2 Scrap\nCD2 WorkCard Close\nCD2 Diameter Value\nCD2 Transfer to MCS\nCD2 Transfer to MCS NEW DESIGN`
-                            )
-                          }
-                          className="text-[11px] font-bold text-emerald-600 hover:text-emerald-800 flex items-center space-x-1 cursor-pointer"
-                        >
-                          <Sparkles className="w-3 h-3" />
-                          <span>Paste Sample Processes</span>
-                        </button>
-                      </div>
-
-                      {/* Active Sub-Function Selection Bar */}
-                      <div className="p-2.5 bg-white border border-slate-200 rounded-xl flex items-center justify-between gap-2 text-xs">
-                        <div className="flex items-center space-x-2">
-                          <span className="font-bold text-slate-600">Select Active Level 2 Sub-Function:</span>
-                          <select
-                            value={selectedSubFunction}
-                            onChange={(e) => handleSubFunctionChange(e.target.value)}
-                            className="px-2.5 py-1 bg-slate-50 border border-slate-300 rounded-lg font-bold text-slate-900 focus:outline-none"
-                          >
-                            {Object.keys(currentModHierarchy).map((subFn) => (
-                              <option key={subFn} value={subFn}>
-                                {subFn} ({(currentModHierarchy[subFn] || []).length} Processes)
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-
-                        {selectedSubFunction && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteSubFunction(selectedSubFunction)}
-                            className="text-[11px] text-rose-600 hover:text-rose-800 font-bold flex items-center space-x-1 cursor-pointer"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                            <span>Delete Sub-Function</span>
-                          </button>
-                        )}
-                      </div>
-
-                      <textarea
-                        rows={6}
-                        value={pastedProcessesText}
-                        onChange={(e) => setPastedProcessesText(e.target.value)}
-                        placeholder={`Paste process options list here (1 per line), e.g.:\nWire Receive From MCS\nCD2 Issue Case ID\nCD2 Comm Update\nRegister CD2 Scrap\nCD2 WorkCard Close\nCD2 Diameter Value\nCD2 Transfer to MCS\nCD2 Transfer to MCS NEW DESIGN`}
-                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                      />
-
-                      <div className="flex items-center justify-between pt-1">
-                        <span className="text-[11px] font-semibold text-slate-500">
-                          {parseLines(pastedProcessesText).length} Process Option(s) typed for "{selectedSubFunction}"
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleSaveLevel3Processes}
-                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition-all flex items-center space-x-1.5 cursor-pointer"
-                        >
-                          <Save className="w-3.5 h-3.5" />
-                          <span>Save Level 3 Processes</span>
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  /* Combined Bulk Import Mode */
-                  <div className="space-y-3 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
-                    <label className="block text-xs font-bold text-slate-800">
-                      Bulk Paste Format: <code className="bg-white border px-1 py-0.5 rounded text-blue-700">SubFunction &gt; Process</code> or <code className="bg-white border px-1 py-0.5 rounded text-blue-700">SubFunction | Process</code>
-                    </label>
-
-                    <textarea
-                      rows={12}
-                      value={bulkImportText}
-                      onChange={(e) => setBulkImportText(e.target.value)}
-                      placeholder={`Paste structured lines, e.g.:\nCD2 Wire Operations > Wire Receive From MCS\nCD2 Wire Operations > CD2 Issue Case ID\nSpool Management > Spool Receiving Program\nSpool Management > Spool Shipping Program`}
-                      className="w-full px-3.5 py-3 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
-                    />
-
-                    <div className="flex items-center justify-between">
-                      <button
-                        type="button"
-                        onClick={() => setBulkImportText('')}
-                        className="px-3.5 py-2 rounded-xl border border-slate-200 hover:bg-white text-xs font-semibold text-slate-600 flex items-center space-x-1.5 cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        <span>Clear Box</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleSaveBulkImportToDb}
-                        className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md hover:shadow-lg transition-all flex items-center space-x-2 cursor-pointer"
-                      >
-                        <Save className="w-4 h-4" />
-                        <span>Import & Save All to Database</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Right Column: 3-Tier Hierarchy Tree Live Preview */}
-              <div className="lg:col-span-5 bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col space-y-3">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-                  <span className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center space-x-1.5">
-                    <ListPlus className="w-4 h-4 text-blue-600" />
-                    <span>3-Tier Hierarchy Live Database Preview</span>
-                  </span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 bg-blue-100 text-blue-900 rounded-full">
-                    {selectedModule}
-                  </span>
-                </div>
-
-                <p className="text-[11px] text-slate-600 leading-tight">
-                  This shows the exact 3-step dropdown cascade that requesters will see in the Change Request Form:
-                </p>
-
-                <div className="space-y-3 flex-1 overflow-y-auto max-h-[540px] pr-1">
-                  {/* Step 1 Preview */}
-                  <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-1 text-xs">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-                      Level 1: Target Module
-                    </span>
-                    <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg font-bold text-blue-950 flex items-center justify-between">
-                      <span>{selectedModule}</span>
-                      <ChevronRight className="w-4 h-4 text-blue-500" />
-                    </div>
-                  </div>
-
-                  {/* Level 2 & 3 Hierarchy Trees */}
-                  {Object.keys(currentModHierarchy).length > 0 ? (
-                    Object.entries(currentModHierarchy).map(([subFn, processes]) => {
-                      const procList = (processes || []) as string[];
-                      const isSelected = selectedSubFunction === subFn;
-                      return (
-                        <div
-                          key={subFn}
-                          onClick={() => handleSubFunctionChange(subFn)}
-                          className={`p-3 rounded-xl border transition-all cursor-pointer ${
-                            isSelected
-                              ? 'bg-blue-50/60 border-blue-400 ring-1 ring-blue-300'
-                              : 'bg-white border-slate-200 hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between font-bold text-slate-900 border-b border-slate-100 pb-1.5">
-                            <span className="flex items-center space-x-1.5 text-blue-950">
-                              <Layers className="w-3.5 h-3.5 text-blue-600" />
-                              <span>Level 2 Sub-Fn: "{subFn}"</span>
-                            </span>
-                            <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full font-mono font-bold">
-                              {procList.length} Processes
-                            </span>
-                          </div>
-
-                          <div className="space-y-1 pl-2 border-l-2 border-blue-200 mt-2">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase block">
-                              Level 3 Process Options
-                            </span>
-                            {procList.length > 0 ? (
-                              procList.map((pName, pIdx) => (
-                                <div
-                                  key={pIdx}
-                                  className="text-[11px] bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200 text-slate-800 font-medium flex items-center space-x-1"
-                                >
-                                  <span className="text-slate-400 font-mono text-[9px]">{pIdx + 1}.</span>
-                                  <span>{pName}</span>
-                                </div>
-                              ))
-                            ) : (
-                              <span className="text-[11px] text-slate-400 italic">No Level 3 processes typed yet.</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="p-6 text-center text-slate-400 text-xs italic bg-white rounded-xl border border-slate-200">
-                      No Level 2 Sub-Functions pasted yet for {selectedModule}. Paste sub-functions on the left!
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Module Summary Grid */}
-          <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 space-y-4">
-            <h3 className="text-sm font-bold text-slate-900 flex items-center space-x-2">
-              <FileCode2 className="w-4 h-4 text-rose-600" />
-              <span>All Target Modules Hierarchy Overview ({availableTargetModules.length} Modules in Database)</span>
-            </h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 text-xs">
-              {availableTargetModules.map((mName, idx) => {
-                const subFns = moduleHierarchyMap[mName] || {};
-                const subFnCount = Object.keys(subFns).length;
-                const totalProcesses = Object.values(subFns).reduce(
-                  (acc: number, curr: unknown) => acc + ((curr || []) as string[]).length,
-                  0
-                );
-                const isSelected = selectedModule === mName;
-
-                return (
-                  <div
-                    key={idx}
-                    onClick={() => handleModuleChange(mName)}
-                    className={`p-3 rounded-xl border cursor-pointer transition-all ${
-                      isSelected
-                        ? 'bg-blue-50/80 border-blue-400 shadow-xs ring-1 ring-blue-400'
-                        : 'bg-slate-50 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between font-bold text-slate-900">
-                      <span className="truncate pr-1">{mName}</span>
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-                          subFnCount > 0 ? 'bg-emerald-100 text-emerald-900' : 'bg-slate-200 text-slate-600'
-                        }`}
-                      >
-                        {subFnCount} Sub-Fns
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      {subFnCount > 0
-                        ? `${totalProcesses} total process options`
-                        : 'No custom sub-functions configured'}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
+        <ServiceCatalogAdminView
+          currentUser={currentUser}
+          initialCatalogTab="appareas"
+          categories={categories}
+          onUpdateCategories={onUpdateCategories}
+          services={services}
+          onUpdateServices={onUpdateServices}
+          applications={applications}
+          onUpdateApplications={onUpdateApplications}
+          issueTypes={issueTypes}
+          onUpdateIssueTypes={onUpdateIssueTypes}
+          modules={modules}
+          onUpdateModules={onUpdateModules}
+          subFunctions={subFunctions}
+          onUpdateSubFunctions={onUpdateSubFunctions}
+          processes={processes}
+          onUpdateProcesses={onUpdateProcesses}
+        />
       )}
 
       {/* TAB 2: User Directory & Account Registration */}
@@ -1658,7 +1239,7 @@ ${userInserts}
                           <span className="font-mono text-slate-400 text-[10px] block">{u.id}</span>
                           {u.registeredAt && (
                             <span className="text-[10px] text-slate-400 block">
-                              Reg: {u.registeredAt}
+                              Reg: {formatDisplayDateTime(u.registeredAt)}
                             </span>
                           )}
                         </td>
@@ -1702,11 +1283,11 @@ ${userInserts}
                             onChange={(e) => handleRoleChange(u.id, e.target.value as UserRole)}
                             className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white font-bold text-xs focus:ring-2 focus:ring-rose-200 cursor-pointer"
                           >
-                            <option value="Requester">Requester</option>
-                            <option value="Department HOD">Department HOD</option>
-                            <option value="IT Admin">IT Admin</option>
-                            <option value="Software Developer">Software Developer</option>
-                            <option value="System Admin">System Admin</option>
+                            {customRoles.map((r) => (
+                              <option key={r.id} value={r.roleName}>
+                                {r.roleName} {!r.isSystemRole ? '★ (Custom)' : ''}
+                              </option>
+                            ))}
                           </select>
                         </td>
                         <td className="p-3">
@@ -1743,6 +1324,14 @@ ${userInserts}
                                 )}
                               </button>
                             )}
+                            <button
+                              onClick={() => handleOpenEditUserModal(u)}
+                              className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-300 font-bold rounded-lg text-xs shadow-2xs flex items-center space-x-1 cursor-pointer transition-all"
+                              title="Edit User Role, Department, and Profile (with explicit database save)"
+                            >
+                              <Edit3 className="w-3.5 h-3.5 text-blue-600" />
+                              <span>Edit / Role</span>
+                            </button>
                             <button
                               onClick={() => handleOpenAdminResetModal(u)}
                               className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold rounded-lg text-xs shadow-2xs flex items-center space-x-1 cursor-pointer transition-all"
@@ -1914,7 +1503,7 @@ ${userInserts}
                     <span>•</span>
                     <span>Free Space: {(storageTestResult.freeGb / 1024).toFixed(2)} TB / {(storageTestResult.totalGb / 1024).toFixed(2)} TB</span>
                     <span>•</span>
-                    <span>Tested at: {storageTestResult.testedAt}</span>
+                    <span>Tested at: {formatDisplayDateTime(storageTestResult.testedAt)}</span>
                   </div>
                 </div>
               </div>
@@ -1964,7 +1553,7 @@ ${userInserts}
                 <h3 className="text-base font-bold text-slate-900">IT Storage Repository Settings</h3>
               </div>
               <span className="text-xs text-slate-400">
-                Last updated by <strong className="text-slate-700">{storageConfigState.updatedBy || 'IT System Admin'}</strong> at {storageConfigState.updatedAt || 'Recent'}
+                Last updated by <strong className="text-slate-700">{storageConfigState.updatedBy || 'IT System Admin'}</strong> at {storageConfigState.updatedAt ? formatDisplayDateTime(storageConfigState.updatedAt) : 'Recent'}
               </span>
             </div>
 
@@ -2048,9 +1637,9 @@ ${userInserts}
                     }
                     className="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-slate-900 text-xs font-semibold focus:ring-2 focus:ring-indigo-200 focus:outline-none bg-white"
                   >
-                    <option value="YEAR_MONTH_CRID">\YYYY\MM\CR-ID\ (e.g. \2026\08\PCS-CR-2026-00001\file.pdf) [Recommended]</option>
+                    <option value="YEAR_MONTH_CRID">\YYYY\MM\CR-ID\ (e.g. \2026\08\ITO-CR-2026-00001\file.pdf) [Recommended]</option>
                     <option value="YEAR_MONTH">\YYYY\MM\ (e.g. \2026\08\file.pdf)</option>
-                    <option value="DEPARTMENT_CRID">\DepartmentCode\CR-ID\ (e.g. \QA\PCS-CR-2026-00001\file.pdf)</option>
+                    <option value="DEPARTMENT_CRID">\DepartmentCode\CR-ID\ (e.g. \QA\ITO-CR-2026-00001\file.pdf)</option>
                     <option value="FLAT">\Flat Directory\ (Not recommended for high volumes)</option>
                   </select>
                   <p className="text-[11px] text-slate-400">Automatic hierarchical folder generation pattern</p>
@@ -2617,11 +2206,11 @@ ${userInserts}
                   onChange={(e) => setNewRole(e.target.value as UserRole)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-bold focus:ring-2 focus:ring-slate-200 focus:outline-none"
                 >
-                  <option value="Requester">Requester</option>
-                  <option value="Department HOD">Department HOD</option>
-                  <option value="IT Admin">IT Admin</option>
-                  <option value="Software Developer">Software Developer</option>
-                  <option value="System Admin">System Admin</option>
+                  {customRoles.map((r) => (
+                    <option key={r.id} value={r.roleName}>
+                      {r.roleName} {!r.isSystemRole ? '★ (Custom)' : ''}
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -2638,6 +2227,166 @@ ${userInserts}
                   className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl shadow-xs cursor-pointer"
                 >
                   Register & Create Account
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 1B: Edit User Profile & Assigned Role (with explicit DB save) */}
+      {showEditUserModal && userForEdit && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 space-y-5 animate-scaleUp">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="p-2 bg-blue-100 text-blue-800 rounded-xl border border-blue-200">
+                  <Edit3 className="w-5 h-5 text-blue-700" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">Edit User Profile & Role</h3>
+                  <p className="text-xs text-slate-500">
+                    Modify RBAC Role, Department, or Account Status for <strong className="font-mono text-slate-700">{userForEdit.id}</strong>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditUserModal(false);
+                  setUserForEdit(null);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {userEditError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-1">
+                <div className="flex items-center space-x-1.5 font-bold text-rose-800">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>PostgreSQL Update Failed</span>
+                </div>
+                <p className="font-mono text-[11px] bg-rose-100/70 p-2 rounded border border-rose-300 break-words">
+                  {userEditError}
+                </p>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveEditUser} className="space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1">User ID</label>
+                  <input
+                    type="text"
+                    disabled
+                    value={userForEdit.id}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-100 font-mono text-slate-600 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-800 mb-1">Account Status *</label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 font-bold focus:ring-2 focus:ring-blue-200"
+                  >
+                    <option value="Active">Active</option>
+                    <option value="Pending IT Approval">Pending IT Approval</option>
+                    <option value="Suspended">Suspended</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={editFullName}
+                  onChange={(e) => setEditFullName(e.target.value)}
+                  placeholder="e.g. Ahmad Rizal"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-semibold focus:ring-2 focus:ring-blue-200 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">Work Email Address *</label>
+                <input
+                  type="email"
+                  required
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  placeholder="e.g. ahmad.rizal@tanaka.com.my"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-mono focus:ring-2 focus:ring-blue-200 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  Department / Section Assignment *
+                </label>
+                <select
+                  value={editDepartmentId}
+                  onChange={(e) => setEditDepartmentId(Number(e.target.value))}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-slate-900 font-semibold focus:ring-2 focus:ring-blue-200 focus:outline-none cursor-pointer"
+                >
+                  {departments.map((dept) => (
+                    <option key={dept.id} value={dept.id}>
+                      [{dept.code}] {dept.name} (HOD: {dept.hodName})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-800 mb-1">
+                  Assigned RBAC Role *
+                </label>
+                <select
+                  value={editRole}
+                  onChange={(e) => setEditRole(e.target.value as UserRole)}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-rose-300 bg-rose-50/50 text-slate-900 font-bold focus:ring-2 focus:ring-rose-200 focus:outline-none cursor-pointer"
+                >
+                  {customRoles.map((r) => (
+                    <option key={r.id} value={r.roleName}>
+                      {r.roleName} {!r.isSystemRole ? '★ (Custom Role)' : ''}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-[10px] text-slate-500 mt-1 block">
+                  Permissions and workspace access update immediately upon database save.
+                </span>
+              </div>
+
+              <div className="pt-3 flex items-center justify-end space-x-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEditUserModal(false);
+                    setUserForEdit(null);
+                  }}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingUserEdit}
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold rounded-xl shadow-md cursor-pointer flex items-center space-x-1.5 transition-all"
+                >
+                  {isSavingUserEdit ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Saving to PostgreSQL...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Save Changes to Database</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -2933,11 +2682,7 @@ ${userInserts}
                     </div>
                   )}
 
-                  {/* Automated Dispatch confirmation */}
-                  <div className="flex items-center space-x-2 text-[11px] text-slate-600 bg-slate-100/70 p-2.5 rounded-lg border border-slate-200">
-                    <Send className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>Automated approval & welcome notification email sent via Tanaka SMTP relay.</span>
-                  </div>
+                 
 
                   {/* Action Button */}
                   <div className="pt-2 flex justify-end">

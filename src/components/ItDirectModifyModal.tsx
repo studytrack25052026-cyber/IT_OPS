@@ -1,6 +1,16 @@
-import React, { useState } from 'react';
-import { ChangeRequest, UserProfile, PriorityLevel, TicketCategory, TicketIssueType } from '../types';
-import { MASTER_CATEGORIES, MASTER_SERVICES, MASTER_APPLICATIONS_ASSETS, MASTER_ISSUE_TYPES } from '../data/serviceCatalog';
+import React, { useState, useEffect } from 'react';
+import {
+  ChangeRequest,
+  UserProfile,
+  PriorityLevel,
+  TicketCategory,
+  TicketIssueType,
+  CategoryMaster,
+  ServiceMaster,
+  ApplicationAssetMaster,
+  IssueTypeMaster,
+} from '../types';
+import { api } from '../services/api';
 import { StaffWorkloadTable } from './StaffWorkloadTable';
 import {
   X,
@@ -48,6 +58,10 @@ interface ItDirectModifyModalProps {
   developers: UserProfile[];
   changeRequests?: ChangeRequest[];
   onSave: (payload: ItDirectModifyPayload) => void;
+  categories?: CategoryMaster[];
+  services?: ServiceMaster[];
+  applications?: ApplicationAssetMaster[];
+  issueTypes?: IssueTypeMaster[];
 }
 
 export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
@@ -58,16 +72,76 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
   developers,
   changeRequests = [],
   onSave,
+  categories,
+  services,
+  applications,
+  issueTypes,
 }) => {
+  // Dynamic Catalog State
+  const [dynamicCategories, setDynamicCategories] = useState<CategoryMaster[]>(() => {
+    if (categories && categories.length > 0) return categories;
+    try {
+      const cached = localStorage.getItem('pcs_catalog_cats_v1');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return [];
+  });
+
+  const [dynamicServices, setDynamicServices] = useState<ServiceMaster[]>(() => {
+    if (services && services.length > 0) return services;
+    try {
+      const cached = localStorage.getItem('pcs_catalog_services_v1');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return [];
+  });
+
+  const [dynamicApps, setDynamicApps] = useState<ApplicationAssetMaster[]>(() => {
+    if (applications && applications.length > 0) return applications;
+    try {
+      const cached = localStorage.getItem('pcs_catalog_apps_v1');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return [];
+  });
+
+  const [dynamicIssueTypes, setDynamicIssueTypes] = useState<IssueTypeMaster[]>(() => {
+    if (issueTypes && issueTypes.length > 0) return issueTypes;
+    try {
+      const cached = localStorage.getItem('pcs_catalog_issuetypes_v1');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return [];
+  });
+
+  useEffect(() => {
+    if (categories && categories.length > 0) setDynamicCategories(categories);
+    if (services && services.length > 0) setDynamicServices(services);
+    if (applications && applications.length > 0) setDynamicApps(applications);
+    if (issueTypes && issueTypes.length > 0) setDynamicIssueTypes(issueTypes);
+
+    if (!applications || applications.length === 0) {
+      api.getCatalog().then((res) => {
+        if (res.success && res.data) {
+          if (Array.isArray(res.data.categories) && res.data.categories.length > 0) setDynamicCategories(res.data.categories);
+          if (Array.isArray(res.data.services) && res.data.services.length > 0) setDynamicServices(res.data.services);
+          if (Array.isArray(res.data.applications) && res.data.applications.length > 0) setDynamicApps(res.data.applications);
+          if (Array.isArray(res.data.issueTypes) && res.data.issueTypes.length > 0) setDynamicIssueTypes(res.data.issueTypes);
+        }
+      }).catch(() => {});
+    }
+  }, [categories, services, applications, issueTypes]);
+
   // Classification states
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>(
     changeRequest.categoryId ||
-      MASTER_CATEGORIES.find((c) => c.name === changeRequest.category)?.id ||
-      MASTER_CATEGORIES[0].id
+      dynamicCategories.find((c) => c.name === changeRequest.category)?.id ||
+      dynamicCategories[0]?.id ||
+      ''
   );
 
-  const activeCategory = MASTER_CATEGORIES.find((c) => c.id === selectedCategoryId) || MASTER_CATEGORIES[0];
-  const availableServices = MASTER_SERVICES.filter((s) => s.categoryId === activeCategory.id);
+  const activeCategory = dynamicCategories.find((c) => c.id === selectedCategoryId) || dynamicCategories[0];
+  const availableServices = dynamicServices.filter((s) => s.categoryId === activeCategory?.id);
 
   const [selectedServiceId, setSelectedServiceId] = useState<string>(
     changeRequest.serviceId ||
@@ -77,7 +151,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
   );
 
   const activeService = availableServices.find((s) => s.id === selectedServiceId) || availableServices[0];
-  const availableApplications = MASTER_APPLICATIONS_ASSETS.filter((a) =>
+  const availableApplications = dynamicApps.filter((a) =>
     a.serviceId ? a.serviceId === selectedServiceId : true
   );
 
@@ -90,8 +164,9 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
 
   const [selectedIssueTypeId, setSelectedIssueTypeId] = useState<string>(
     changeRequest.issueTypeId ||
-      MASTER_ISSUE_TYPES.find((i) => i.name === changeRequest.issueType)?.id ||
-      MASTER_ISSUE_TYPES[0].id
+      dynamicIssueTypes.find((i) => i.name === changeRequest.issueType)?.id ||
+      dynamicIssueTypes[0]?.id ||
+      ''
   );
 
   // Priority state
@@ -119,17 +194,16 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
 
   const isPriorityChanged = priority !== changeRequest.priority;
   const isCategoryChanged =
-    activeCategory.name !== changeRequest.category ||
+    activeCategory?.name !== changeRequest.category ||
     (activeService && activeService.name !== changeRequest.subcategory);
   const isDevChanged = assignedDevId !== (changeRequest.assignedDeveloperId || '');
 
   const handleCategoryChange = (newCatId: string) => {
     setSelectedCategoryId(newCatId);
-    const newCat = MASTER_CATEGORIES.find((c) => c.id === newCatId);
-    const newServices = MASTER_SERVICES.filter((s) => s.categoryId === newCatId);
+    const newServices = dynamicServices.filter((s) => s.categoryId === newCatId);
     if (newServices.length > 0) {
       setSelectedServiceId(newServices[0].id);
-      const newApps = MASTER_APPLICATIONS_ASSETS.filter((a) =>
+      const newApps = dynamicApps.filter((a) =>
         a.serviceId ? a.serviceId === newServices[0].id : true
       );
       setSelectedAppAssetId(newApps[0]?.id || '');
@@ -141,7 +215,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
 
   const handleServiceChange = (newSrvId: string) => {
     setSelectedServiceId(newSrvId);
-    const newApps = MASTER_APPLICATIONS_ASSETS.filter((a) =>
+    const newApps = dynamicApps.filter((a) =>
       a.serviceId ? a.serviceId === newSrvId : true
     );
     setSelectedAppAssetId(newApps[0]?.id || '');
@@ -158,13 +232,13 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
 
     const assignedDev = developers.find((d) => d.id === assignedDevId);
     const activeApp = availableApplications.find((a) => a.id === selectedAppAssetId);
-    const activeIssueType = MASTER_ISSUE_TYPES.find((i) => i.id === selectedIssueTypeId);
+    const activeIssueType = dynamicIssueTypes.find((i) => i.id === selectedIssueTypeId);
 
     onSave({
       crId: changeRequest.id,
-      categoryId: activeCategory.id,
-      categoryName: activeCategory.name,
-      category: activeCategory.name,
+      categoryId: activeCategory?.id,
+      categoryName: activeCategory?.name,
+      category: activeCategory?.name,
       serviceId: activeService?.id,
       serviceName: activeService?.name,
       subcategory: activeService?.name,
@@ -311,9 +385,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
                     : 'border-slate-300 bg-white focus:ring-2 focus:ring-indigo-100'
                 }`}
               />
-              <p className="text-[10px] text-slate-500 mt-1">
-                This explanation will be permanently recorded in the immutable audit log and emailed directly to the requester.
-              </p>
+             
             </div>
           </div>
 
@@ -342,7 +414,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
                   onChange={(e) => handleCategoryChange(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 text-xs"
                 >
-                  {MASTER_CATEGORIES.map((cat) => (
+                  {dynamicCategories.map((cat) => (
                     <option key={cat.id} value={cat.id}>
                       {cat.name}
                     </option>
@@ -401,7 +473,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
                   onChange={(e) => setSelectedIssueTypeId(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-100 text-xs"
                 >
-                  {MASTER_ISSUE_TYPES.map((type) => (
+                  {dynamicIssueTypes.map((type) => (
                     <option key={type.id} value={type.id}>
                       {type.name}
                     </option>
@@ -438,7 +510,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 text-[11px] mb-1">
-                    Assigned Software Developer
+                    Assigned IT Staff / Developer
                   </label>
                   <select
                     value={assignedDevId}
@@ -448,7 +520,7 @@ export const ItDirectModifyModal: React.FC<ItDirectModifyModalProps> = ({
                     <option value="">(Unassigned - Pending IT Queue)</option>
                     {developers.map((dev) => (
                       <option key={dev.id} value={dev.id}>
-                        {dev.fullName} ({dev.email})
+                        {dev.fullName} ({dev.role || 'Staff'} - {dev.departmentName || 'IT'})
                       </option>
                     ))}
                   </select>

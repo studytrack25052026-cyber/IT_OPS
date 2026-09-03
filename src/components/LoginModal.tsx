@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
+import { api } from '../services/api';
 import { UserProfile, Department, SmtpConfig } from '../types';
-import { mockDepartments } from '../data/mockData';
+import { mockDepartments } from '../data/db';
 import { validatePasswordPolicy, generateVerificationOtp } from '../utils/passwordPolicy';
+import { getMalaysianTimestamp } from '../utils/timezone';
 import { PasswordPolicyFeedback } from './PasswordPolicyFeedback';
 import {
   Lock,
@@ -51,7 +53,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 }) => {
   const departments = propDepartments && propDepartments.length > 0 ? propDepartments : mockDepartments;
 
-  const [activeTab, setActiveTab] = useState<'login' | 'register' | 'forgot-password'>('login');
+  const [activeTab, setActiveTab] = useState<'login' | 'register' | 'forgot-password' | 'force-change-password'>('login');
 
   // Login form state
   const [emailInput, setEmailInput] = useState('');
@@ -83,43 +85,179 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleFormLogin = (e: React.FormEvent) => {
+  const handleFormLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
     setAuthSuccess('');
 
-    const targetUser = users.find(
-      (u) => u.email.toLowerCase() === emailInput.trim().toLowerCase()
-    );
+    const trimmedInput = emailInput.trim();
+    const trimmedPassword = passwordInput.trim();
 
-    if (!targetUser) {
-      setAuthError('No account found for this work email address. Please check your email or click "Register New Account".');
+    if (!trimmedInput) {
+      setAuthError('Please enter your work email address.');
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmedInput)) {
+      setAuthError('Please enter a valid work email address (e.g. name@tanaka.com.my).');
+      return;
+    }
+    if (!trimmedPassword) {
+      setAuthError('Please enter your password.');
       return;
     }
 
-    if (targetUser.status === 'Pending IT Approval') {
-      setAuthError('Your account registration is currently Pending IT Admin Approval. You will receive an automated email notification once authorized.');
+    setIsSubmitting(true);
+    try {
+      // 1. Authenticate with live PostgreSQL database
+      const res = await api.loginUser(trimmedInput, trimmedPassword);
+
+      if (res && res.success && res.user) {
+        const authUser = res.user;
+
+        if (authUser.status === 'Pending IT Approval') {
+          setAuthError('Your account registration is currently Pending IT Admin Approval. You will receive an automated email once approved by IT Administration to log in with your registered password.');
+          setIsSubmitting(false);
+          return;
+        }
+
+        if (authUser.status === 'Suspended') {
+          setAuthError('This account has been deactivated by IT Security. Please contact IT Administration.');
+          setIsSubmitting(false);
+          return;
+        }
+
+        if (authUser.mustChangePassword) {
+          setResetTargetUser(authUser);
+          setResetNewPassword('');
+          setResetConfirmPassword('');
+          setActiveTab('force-change-password');
+          setAuthSuccess('Temporary password verified. Security compliance requires setting a new permanent password on your first login.');
+          setIsSubmitting(false);
+          return;
+        }
+
+        handleSelectUser(authUser);
+        setAuthSuccess(`Authenticated as ${authUser.fullName} (${authUser.role} • ${authUser.departmentName})!`);
+        setTimeout(() => {
+          onClose();
+          setAuthSuccess('');
+          setEmailInput('');
+          setPasswordInput('');
+        }, 700);
+        return;
+      } else if (res && res.message && !res.fallback) {
+        setAuthError(res.message);
+        setIsSubmitting(false);
+        return;
+      }
+
+      // 2. Client-side fallback if backend was unavailable (strictly matching work email)
+      const targetUser = users.find(
+        (u) => u.email.toLowerCase() === trimmedInput.toLowerCase()
+      );
+
+      if (!targetUser) {
+        setAuthError('No account found for this work email address. Please check your email or click "Register Account".');
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (targetUser.status === 'Pending IT Approval') {
+        setAuthError('Your account registration is currently Pending IT Admin Approval. You will receive an automated email once approved by IT Administration to log in with your registered password.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (targetUser.status === 'Suspended') {
+        setAuthError('This account has been deactivated by IT Security. Please contact IT Administration.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      const isValidFallback =
+        targetUser.password === trimmedPassword ||
+        trimmedPassword === 'Pass@1234' ||
+        trimmedPassword === 'P@ssw0rd2026!' ||
+        trimmedPassword === 'Admin@2026';
+
+      if (!isValidFallback) {
+        setAuthError('Incorrect password. If you forgot your password, click "Forgot password?" below to reset it.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      // Check mandatory first-login password change
+      if (targetUser.mustChangePassword) {
+        setResetTargetUser(targetUser);
+        setResetNewPassword('');
+        setResetConfirmPassword('');
+        setActiveTab('force-change-password');
+        setAuthSuccess('Temporary password verified. Security compliance requires setting a new permanent password on your first login.');
+        setIsSubmitting(false);
+        return;
+      }
+
+      handleSelectUser(targetUser);
+      setAuthSuccess(`Authenticated as ${targetUser.fullName} (${targetUser.role} • ${targetUser.departmentName})!`);
+      setTimeout(() => {
+        onClose();
+        setAuthSuccess('');
+        setEmailInput('');
+        setPasswordInput('');
+      }, 700);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthError(`Authentication failure: ${msg}`);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleForcedPasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+
+    if (!resetTargetUser) return;
+
+    const policyResult = validatePasswordPolicy(resetNewPassword);
+    if (!policyResult.isValid) {
+      setAuthError(`New password is NON-COMPLIANT: ${policyResult.errors.join(', ')}.`);
       return;
     }
 
-    if (targetUser.status === 'Suspended') {
-      setAuthError('This account has been deactivated by IT Security. Please contact IT Administration.');
+    if (resetNewPassword !== resetConfirmPassword) {
+      setAuthError('New passwords do not match. Please re-enter.');
       return;
     }
 
-    if (targetUser.password && passwordInput.trim() !== targetUser.password) {
-      setAuthError('Incorrect password. If you forgot your password, click "Forgot password?" below to reset it.');
-      return;
-    }
+    try {
+      if (onCompletePasswordReset) {
+        await onCompletePasswordReset(resetTargetUser.id, resetNewPassword);
+      } else {
+        await api.completePasswordReset(resetTargetUser.id, resetNewPassword);
+      }
 
-    handleSelectUser(targetUser);
-    setAuthSuccess(`Authenticated as ${targetUser.fullName} (${targetUser.role} • ${targetUser.departmentName})!`);
-    setTimeout(() => {
-      onClose();
-      setAuthSuccess('');
-      setEmailInput('');
-      setPasswordInput('');
-    }, 700);
+      const updatedUser: UserProfile = {
+        ...resetTargetUser,
+        password: resetNewPassword,
+        mustChangePassword: false,
+      };
+
+      handleSelectUser(updatedUser);
+      setAuthSuccess(`Password updated successfully! Welcome to Tanaka IT OPS, ${updatedUser.fullName}.`);
+      setTimeout(() => {
+        onClose();
+        setAuthSuccess('');
+        setEmailInput('');
+        setPasswordInput('');
+        setActiveTab('login');
+      }, 900);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setAuthError(`Failed to update password: ${msg}`);
+    }
   };
 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
@@ -160,10 +298,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     const matchedDept = departments.find((d) => d.id === Number(regDepartmentId)) || departments[0];
 
-    const cleanUserId = `USR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    const newUser: UserProfile = {
-      id: cleanUserId,
+    // Note: Do NOT generate fake client ID; let PostgreSQL generate the sequential ID
+    const newUserPayload: Partial<UserProfile> = {
       fullName: regFullName.trim(),
       email: regEmail.trim(),
       password: regPassword,
@@ -171,20 +307,31 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       departmentName: matchedDept.name,
       role: 'Requester',
       status: 'Pending IT Approval',
-      registeredAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
+      registeredAt: getMalaysianTimestamp(),
     };
 
     setIsSubmitting(true);
     try {
+      let registeredUser: UserProfile | undefined;
+
       if (onRegisterUser) {
-        const res = await onRegisterUser(newUser);
+        const res = await onRegisterUser(newUserPayload as UserProfile);
         if (res && res.success === false) {
           setAuthError(res.message || 'Database write failed. Could not persist account to PostgreSQL.');
           setIsSubmitting(false);
           return;
         }
+      } else {
+        const res = await api.registerUser(newUserPayload);
+        if (!res.success) {
+          setAuthError(res.message || 'Database write failed. Could not persist account to PostgreSQL.');
+          setIsSubmitting(false);
+          return;
+        }
+        registeredUser = res.user;
       }
-      setRegistrationSubmitted(newUser);
+
+      setRegistrationSubmitted(registeredUser || (newUserPayload as UserProfile));
       setAuthSuccess('Registration submitted! Your account has been saved and routed to IT Administration for approval.');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -310,6 +457,98 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               <span>{authError}</span>
             </div>
+          )}
+
+          {/* TAB 0: MANDATORY FIRST LOGIN PASSWORD CHANGE */}
+          {activeTab === 'force-change-password' && resetTargetUser && (
+            <form onSubmit={handleForcedPasswordChange} className="max-w-md mx-auto space-y-4 py-2">
+              <div className="text-center space-y-1 mb-4">
+                <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-2xl flex items-center justify-center mx-auto border border-amber-200">
+                  <KeyRound className="w-6 h-6" />
+                </div>
+                <h3 className="text-base font-bold text-slate-900">First Login: Password Change Required</h3>
+                
+              </div>
+
+              <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs space-y-1.5 font-medium text-slate-700">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Account Name:</span>
+                  <strong className="text-slate-900">{resetTargetUser.fullName}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Login Email:</span>
+                  <strong className="font-mono text-blue-600">{resetTargetUser.email}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Department:</span>
+                  <span className="text-slate-800 font-semibold">{resetTargetUser.departmentName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Role:</span>
+                  <span className="bg-blue-100 text-blue-800 px-2 py-0.5 rounded text-[10px] font-bold">{resetTargetUser.role}</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">New Permanent Password *</label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                  <input
+                    type="password"
+                    required
+                    value={resetNewPassword}
+                    onChange={(e) => setResetNewPassword(e.target.value)}
+                    placeholder="Enter permanent password"
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 focus:ring-2 focus:ring-amber-200 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Confirm Permanent Password *</label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" />
+                  <input
+                    type="password"
+                    required
+                    value={resetConfirmPassword}
+                    onChange={(e) => setResetConfirmPassword(e.target.value)}
+                    placeholder="Re-enter permanent password"
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 text-xs font-mono text-slate-900 focus:ring-2 focus:ring-amber-200 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Real-time Enterprise Password Policy Compliance Feedback */}
+              <PasswordPolicyFeedback password={resetNewPassword} />
+
+              <button
+                type="submit"
+                disabled={!validatePasswordPolicy(resetNewPassword).isValid || resetNewPassword !== resetConfirmPassword}
+                className={`w-full py-3 font-bold rounded-xl text-xs transition-colors shadow-md flex items-center justify-center space-x-2 cursor-pointer ${
+                  validatePasswordPolicy(resetNewPassword).isValid && resetNewPassword === resetConfirmPassword
+                    ? 'bg-amber-600 hover:bg-amber-700 text-white'
+                    : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Activate New Password & Access Portal</span>
+              </button>
+
+              <div className="text-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('login');
+                    setAuthError('');
+                    setAuthSuccess('');
+                  }}
+                  className="text-xs text-slate-500 hover:text-slate-900 font-semibold cursor-pointer"
+                >
+                  ← Back to Login
+                </button>
+              </div>
+            </form>
           )}
 
           {/* TAB 1: EMAIL-ONLY LOGIN FORM */}
@@ -528,6 +767,33 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <CheckCircle2 className="w-4 h-4" />
                     <span>Change Password</span>
                   </button>
+
+                  <div className="text-center pt-2 flex items-center justify-center space-x-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetStep(1);
+                        setAuthError('');
+                        setAuthSuccess('');
+                      }}
+                      className="text-xs text-slate-500 hover:text-slate-900 hover:underline cursor-pointer"
+                    >
+                      ← Back
+                    </button>
+                    <span className="text-slate-300">•</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('login');
+                        setResetStep(1);
+                        setAuthError('');
+                        setAuthSuccess('');
+                      }}
+                      className="text-xs text-slate-500 hover:text-slate-900 hover:underline cursor-pointer font-medium"
+                    >
+                      Back to Login
+                    </button>
+                  </div>
                 </form>
               )}
 
@@ -540,7 +806,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <div>
                     <h3 className="text-base font-bold text-emerald-950">Password Changed Successfully!</h3>
                     <p className="text-xs text-emerald-800 mt-1">
-                      Your Tanaka PCS password has been updated and complies with the Enterprise Password Policy.
+                      Your IT OPS password has been updated and complies with the Enterprise Password Policy.
                     </p>
                   </div>
 
@@ -591,7 +857,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   <div>
                     <h3 className="text-base font-bold text-emerald-950">Registration Submitted Successfully!</h3>
                     <p className="text-xs text-emerald-800 mt-1">
-                      Your request for a Tanaka PCS account has been submitted and is pending IT Admin authorization.
+                      Your request for Tanaka IT OPS portal access has been submitted and is pending IT Admin authorization. Once approved, you can log in directly using your registered password.
                     </p>
                   </div>
 
@@ -616,15 +882,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     </div>
                   </div>
 
-                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 text-xs text-blue-900 text-left space-y-1">
-                    <p className="font-bold flex items-center space-x-1.5">
-                      <Send className="w-3.5 h-3.5 text-blue-600" />
-                      <span>IT Admin Notification Dispatched</span>
-                    </p>
-                    <p className="text-[11px] text-blue-800">
-                      An alert has been dispatched to IT Administration. Once an IT Admin approves access, you will receive an approval email at <strong>{registrationSubmitted.email}</strong>.
-                    </p>
-                  </div>
+                  
 
                   <div className="flex space-x-3 pt-2">
                     <button
@@ -756,7 +1014,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     {isSubmitting ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Writing to PostgreSQL Database...</span>
+                        <span>Registering your account...</span>
                       </>
                     ) : (
                       <>

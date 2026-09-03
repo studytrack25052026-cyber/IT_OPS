@@ -112,7 +112,7 @@ export const StaffWorkloadTable: React.FC<StaffWorkloadTableProps> = ({
                       : 'hover:bg-slate-50'
                   }`}
                 >
-                  {/* Staff Name & Recommendation Badge */}
+                  {/* Staff Name, Role & Recommendation Badge */}
                   <td className="py-2.5 px-3">
                     <div className="flex items-center gap-2 flex-wrap">
                       <div className="w-6 h-6 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-[10px] shrink-0">
@@ -123,7 +123,17 @@ export const StaffWorkloadTable: React.FC<StaffWorkloadTableProps> = ({
                           .join('')}
                       </div>
                       <div>
-                        <span className="text-slate-900 font-semibold text-xs">{item.user.fullName}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-slate-900 font-semibold text-xs">{item.user.fullName}</span>
+                          <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                            {item.user.role || 'IT Staff'}
+                          </span>
+                          {item.user.departmentName && (
+                            <span className="text-[10px] text-slate-400">
+                              ({item.user.departmentName})
+                            </span>
+                          )}
+                        </div>
                         <span className="text-slate-500 text-[10px] block">{item.user.email}</span>
                       </div>
                       {item.isRecommended && (

@@ -1,4 +1,21 @@
-import { Department, UserProfile, ChangeRequest, PcsModule, NotificationItem, SmtpConfig, EmailNotificationLog, StorageConfig, TemporaryApproverDelegation } from '../types';
+import {
+  Department,
+  UserProfile,
+  ChangeRequest,
+  PcsModule,
+  NotificationItem,
+  SmtpConfig,
+  EmailNotificationLog,
+  StorageConfig,
+  TemporaryApproverDelegation,
+  CustomRoleDefinition,
+} from '../types';
+
+/**
+ * Tanaka Production Control System (PCS) Database Baseline & Constants
+ * This file replaces legacy mockData.ts and serves as the single enterprise-standard
+ * data definition and configuration reference. All live actions synchronize with PostgreSQL.
+ */
 
 export const defaultStorageConfig: StorageConfig = {
   id: 'vault-tanaka-prod-01',
@@ -22,9 +39,11 @@ export const defaultSmtpConfig: SmtpConfig = {
   smtpPort: 25,
   fromAddress: 'Administrator@tanaka.com.my',
   fromName: 'IT OPS',
+  authRequired: false,
+  useTls: false,
 };
 
-export const mockDepartments: Department[] = [
+export const officialTanakaDepartments: Department[] = [
   { id: 1, name: 'General Manager', code: 'GM', hodUserId: 'user-hod-gm', hodName: 'Mr. Fukui', hodEmail: 'fukui@ml.tanaka.co.jp' },
   { id: 2, name: 'Human Resources', code: 'HR', hodUserId: 'user-hod-hr', hodName: 'Chong Jun Leong (Mr. Chong)', hodEmail: 'chong@tanaka.com.my' },
   { id: 3, name: 'TKK Marketing', code: 'MKT', hodUserId: 'user-hod-mkt', hodName: 'CS Tan (Mr. CS Tan)', hodEmail: 'cstan@ml.tanaka.co.jp' },
@@ -38,8 +57,8 @@ export const mockDepartments: Department[] = [
   { id: 11, name: 'Administration', code: 'ADM', hodUserId: 'user-hod-adm', hodName: 'Khoo Lay Ean (Ms. LE Khoo)', hodEmail: 'LEKHOO@tanaka.com.my' },
 ];
 
-export const mockUsers: UserProfile[] = [
-  // IT Admins, Developers & System Admin
+export const baselineEnterpriseUsers: UserProfile[] = [
+  // IT Admins, Helpdesk, Developers & System Admin
   {
     id: 'user-admin-it',
     fullName: 'David Ng',
@@ -49,6 +68,17 @@ export const mockUsers: UserProfile[] = [
     departmentId: 8,
     departmentName: 'IT',
     role: 'IT Admin',
+    status: 'Active',
+  },
+  {
+    id: 'user-it-helpdesk',
+    fullName: 'Siti Sarah',
+    email: 'siti.helpdesk@tanaka.com.my',
+    username: 'siti.helpdesk',
+    password: 'Pass@1234',
+    departmentId: 8,
+    departmentName: 'IT',
+    role: 'IT Helpdesk',
     status: 'Active',
   },
   {
@@ -285,5 +315,239 @@ export const mockDelegations: TemporaryApproverDelegation[] = [];
 export const mockNotifications: NotificationItem[] = [];
 export const mockEmailLogs: EmailNotificationLog[] = [];
 
-export const productionDepartments = mockDepartments;
-export const productionUsers = mockUsers;
+export const baselineCustomRoles: CustomRoleDefinition[] = [
+  {
+    id: 'role-requester',
+    roleName: 'Requester',
+    archetype: 'Requester',
+    description: 'Standard organizational end-user with access to submit IT change requests, track tickets in My Requests, and reply to clarification requests.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: false,
+      canViewItAdminWorkspace: false,
+      canViewDeveloperBoard: false,
+      canViewClosedCases: false,
+      canViewReports: false,
+      canViewAdminHub: false,
+      canViewEmailHub: false,
+      canApproveHodStage: false,
+      canTriageAndAssignDevs: false,
+      canReturnToRequester: false,
+      canDirectModifyCatalog: false,
+      canVerifyRelease: false,
+      canReopenCases: false,
+      canManageUsers: false,
+    },
+    workflowRouting: {
+      receivesHodReview: false,
+      receivesItAdminReview: false,
+      canBeAssignedAsDeveloper: false,
+      receivesCriticalEscalations: false,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: true,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: false,
+      notifyDelegations: false,
+    },
+  },
+  {
+    id: 'role-hod',
+    roleName: 'Department HOD',
+    archetype: 'Department HOD',
+    description: 'Departmental Head with authority to review, approve, send back, or reject department change requests, and delegate temporary approvers.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: true,
+      canViewItAdminWorkspace: false,
+      canViewDeveloperBoard: false,
+      canViewClosedCases: true,
+      canViewReports: true,
+      canViewAdminHub: false,
+      canViewEmailHub: false,
+      canApproveHodStage: true,
+      canTriageAndAssignDevs: false,
+      canReturnToRequester: true,
+      canDirectModifyCatalog: false,
+      canVerifyRelease: false,
+      canReopenCases: false,
+      canManageUsers: false,
+    },
+    workflowRouting: {
+      receivesHodReview: true,
+      receivesItAdminReview: false,
+      canBeAssignedAsDeveloper: false,
+      receivesCriticalEscalations: false,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: true,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: false,
+      notifyDelegations: true,
+    },
+  },
+  {
+    id: 'role-it-helpdesk',
+    roleName: 'IT Helpdesk',
+    archetype: 'IT Helpdesk',
+    description: 'Frontline IT support and triage operator with capabilities to review tickets, request clarification, monitor email logs, and track task queues.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: false,
+      canViewItAdminWorkspace: true,
+      canViewDeveloperBoard: true,
+      canViewClosedCases: true,
+      canViewReports: true,
+      canViewAdminHub: false,
+      canViewEmailHub: true,
+      canApproveHodStage: false,
+      canTriageAndAssignDevs: true,
+      canReturnToRequester: true,
+      canDirectModifyCatalog: true,
+      canVerifyRelease: true,
+      canReopenCases: false,
+      canManageUsers: false,
+    },
+    workflowRouting: {
+      receivesHodReview: false,
+      receivesItAdminReview: true,
+      canBeAssignedAsDeveloper: true,
+      receivesCriticalEscalations: true,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: true,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: true,
+      notifyDelegations: true,
+    },
+  },
+  {
+    id: 'role-it-admin',
+    roleName: 'IT Admin',
+    archetype: 'IT Admin',
+    description: 'Lead IT Administrator with full operational triage authority, developer workload assignment, direct modifications, and release verification.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: false,
+      canViewItAdminWorkspace: true,
+      canViewDeveloperBoard: true,
+      canViewClosedCases: true,
+      canViewReports: true,
+      canViewAdminHub: false,
+      canViewEmailHub: true,
+      canApproveHodStage: false,
+      canTriageAndAssignDevs: true,
+      canReturnToRequester: true,
+      canDirectModifyCatalog: true,
+      canVerifyRelease: true,
+      canReopenCases: false,
+      canManageUsers: false,
+    },
+    workflowRouting: {
+      receivesHodReview: false,
+      receivesItAdminReview: true,
+      canBeAssignedAsDeveloper: true,
+      receivesCriticalEscalations: true,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: true,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: true,
+      notifyDelegations: true,
+    },
+  },
+  {
+    id: 'role-developer',
+    roleName: 'Software Developer',
+    archetype: 'Software Developer',
+    description: 'Software engineer with task assignment board access to implement changes, manage status cards, and record technical notes.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: false,
+      canViewItAdminWorkspace: false,
+      canViewDeveloperBoard: true,
+      canViewClosedCases: true,
+      canViewReports: true,
+      canViewAdminHub: false,
+      canViewEmailHub: false,
+      canApproveHodStage: false,
+      canTriageAndAssignDevs: false,
+      canReturnToRequester: true,
+      canDirectModifyCatalog: false,
+      canVerifyRelease: false,
+      canReopenCases: false,
+      canManageUsers: false,
+    },
+    workflowRouting: {
+      receivesHodReview: false,
+      receivesItAdminReview: false,
+      canBeAssignedAsDeveloper: true,
+      receivesCriticalEscalations: false,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: false,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: false,
+      notifyDelegations: false,
+    },
+  },
+  {
+    id: 'role-system-admin',
+    roleName: 'System Admin',
+    archetype: 'System Admin',
+    description: 'Full super administrator with complete control over user directory, application catalogs, process options, security policies, and system configuration.',
+    isSystemRole: true,
+    permissions: {
+      canViewMyRequests: true,
+      canViewHodQueue: true,
+      canViewItAdminWorkspace: true,
+      canViewDeveloperBoard: true,
+      canViewClosedCases: true,
+      canViewReports: true,
+      canViewAdminHub: true,
+      canViewEmailHub: true,
+      canApproveHodStage: true,
+      canTriageAndAssignDevs: true,
+      canReturnToRequester: true,
+      canDirectModifyCatalog: true,
+      canVerifyRelease: true,
+      canReopenCases: true,
+      canManageUsers: true,
+    },
+    workflowRouting: {
+      receivesHodReview: true,
+      receivesItAdminReview: true,
+      canBeAssignedAsDeveloper: true,
+      receivesCriticalEscalations: true,
+    },
+    emailSubscriptions: {
+      notifyNewSubmissions: true,
+      notifyClarificationReplies: true,
+      notifyStatusTransitions: true,
+      notifyReleaseVerifications: true,
+      notifyUserRegistrations: true,
+      notifyDelegations: true,
+    },
+  },
+];
+
+// Backwards compatibility aliases
+export const mockDepartments = officialTanakaDepartments;
+export const mockUsers = baselineEnterpriseUsers;
+export const productionDepartments = officialTanakaDepartments;
+export const productionUsers = baselineEnterpriseUsers;

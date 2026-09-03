@@ -1,7 +1,18 @@
-import React, { useState } from 'react';
-import { UserProfile, ChangeRequest, UserProfile as UserType } from '../types';
-import { mockUsers, mockModules } from '../data/mockData';
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  UserProfile,
+  ChangeRequest,
+  UserProfile as UserType,
+  CustomRoleDefinition,
+  CategoryMaster,
+  ServiceMaster,
+  ApplicationAssetMaster,
+  IssueTypeMaster,
+} from '../types';
+import { mockUsers, mockModules } from '../data/db';
 import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass } from '../utils/slaAndRisk';
+import { formatDisplayDate } from '../utils/timezone';
+import { hasRolePermission, getEligibleDevelopers } from '../utils/rbac';
 import { ItDirectModifyModal, ItDirectModifyPayload } from './ItDirectModifyModal';
 import { StaffWorkloadTable } from './StaffWorkloadTable';
 import {
@@ -32,23 +43,35 @@ import {
 interface ItAdminQueueViewProps {
   currentUser: UserProfile;
   changeRequests: ChangeRequest[];
+  users?: UserProfile[];
+  customRoles?: CustomRoleDefinition[];
   onAssignDeveloper: (crId: string, developerId: string, developerName: string, targetDate: string, comments: string) => void;
   onVerifyRelease: (crId: string, verified: boolean, comments: string) => void;
   onSendBackToRequester?: (crId: string, comments: string) => void;
   onItDirectModify?: (payload: ItDirectModifyPayload) => void;
   onRejectCase?: (crId: string, rejectionReason: string) => void;
   onRequestClick: (crId: string) => void;
+  categories?: CategoryMaster[];
+  services?: ServiceMaster[];
+  applications?: ApplicationAssetMaster[];
+  issueTypes?: IssueTypeMaster[];
 }
 
 export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
   currentUser,
   changeRequests,
+  users,
+  customRoles = [],
   onAssignDeveloper,
   onVerifyRelease,
   onSendBackToRequester,
   onItDirectModify,
   onRejectCase,
   onRequestClick,
+  categories,
+  services,
+  applications,
+  issueTypes,
 }) => {
   const [activeTab, setActiveTab] = useState<'review' | 'verification' | 'masterdata'>('review');
   const [selectedCrId, setSelectedCrId] = useState<string | null>(null);
@@ -59,10 +82,26 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
   const [rejectionReason, setRejectionReason] = useState('');
   const [rejectionError, setRejectionError] = useState('');
 
-  const canAssignTickets = currentUser.role === 'IT Admin' || currentUser.role === 'System Admin';
+  // Dynamic capability check for triage and assignment
+  const canAssignTickets = hasRolePermission(currentUser.role, 'canTriageAndAssignDevs', customRoles);
+  const canDirectModify = hasRolePermission(currentUser.role, 'canDirectModifyCatalog', customRoles);
+  const canVerifyReleasePerm = hasRolePermission(currentUser.role, 'canVerifyRelease', customRoles);
+  const canReturnPerm = hasRolePermission(currentUser.role, 'canReturnToRequester', customRoles);
+
+  // Dynamic developer list derived from live system users & Custom Roles Matrix
+  const developers = useMemo(() => {
+    const source = users && users.length > 0 ? users : mockUsers;
+    const eligible = getEligibleDevelopers(source, customRoles);
+    if (eligible.length > 0) return eligible;
+
+    // Fallback if no matching role
+    const devs = source.filter(
+      (u) => (u.role === 'Software Developer' || u.role === 'IT Admin') && u.status !== 'Deactivated'
+    );
+    return devs.length > 0 ? devs : source;
+  }, [users, customRoles]);
 
   // Form states for developer assignment
-  const developers = mockUsers.filter((u) => u.role === 'Software Developer');
   const [selectedDevId, setSelectedDevId] = useState<string>(developers[0]?.id || '');
   const [targetDate, setTargetDate] = useState<string>(
     new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
@@ -80,6 +119,18 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
     new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   );
   const [showBatchModal, setShowBatchModal] = useState(false);
+
+  // Synchronize developer selection when developer roster updates
+  useEffect(() => {
+    if (developers.length > 0) {
+      if (!selectedDevId || !developers.some((d) => d.id === selectedDevId)) {
+        setSelectedDevId(developers[0].id);
+      }
+      if (!batchDevId || !developers.some((d) => d.id === batchDevId)) {
+        setBatchDevId(developers[0].id);
+      }
+    }
+  }, [developers]);
 
   const pendingItReview = changeRequests.filter((cr) => cr.status === 'Pending IT Admin Review');
   const pendingVerification = changeRequests.filter((cr) => cr.status === 'Pending IT Verification');
@@ -172,7 +223,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
             
             <h1 className="text-2xl font-bold">IT Admin Queue Assignment</h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              Logged in as <strong className="text-white">{currentUser.fullName}</strong> (IT Manager)
+              Logged in as <strong className="text-white">{currentUser.fullName}</strong>
             </p>
           </div>
         </div>
@@ -213,7 +264,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
           {pendingItReview.length === 0 ? (
             <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center text-slate-500 space-y-3">
               <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto" />
-              <h2 className="text-base font-bold text-slate-800">No Pending Developer Assignments</h2>
+              <h2 className="text-base font-bold text-slate-800">No Pending Request Assignments</h2>
               <p className="text-xs max-w-md mx-auto text-slate-500">
                 All HOD-approved change requests have been assigned to developers.
               </p>
@@ -448,7 +499,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                         <div>
                           <label className="block font-semibold text-slate-700 mb-1">
-                            Select Software Developer <span className="text-rose-500">*</span>
+                            Select IT Staff / Assignee <span className="text-rose-500">*</span>
                           </label>
                           <select
                             value={selectedDevId}
@@ -457,7 +508,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
                           >
                             {developers.map((dev) => (
                               <option key={dev.id} value={dev.id}>
-                                {dev.fullName} ({dev.email})
+                                {dev.fullName} ({dev.role || 'Staff'} - {dev.departmentName || 'IT'})
                               </option>
                             ))}
                           </select>
@@ -555,7 +606,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
                         {selectedCr.targetCompletionDate && (
                           <div className="flex items-center justify-between">
                             <span className="text-slate-500">Target Date:</span>
-                            <span className="font-mono text-slate-800">{selectedCr.targetCompletionDate}</span>
+                            <span className="font-medium text-slate-800">{formatDisplayDate(selectedCr.targetCompletionDate)}</span>
                           </div>
                         )}
                       </div>
@@ -865,7 +916,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
             <div className="space-y-3">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Assign Developer <span className="text-rose-500">*</span>
+                  Assign IT Staff / Developer <span className="text-rose-500">*</span>
                 </label>
                 <select
                   value={batchDevId}
@@ -874,7 +925,7 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
                 >
                   {developers.map((dev) => (
                     <option key={dev.id} value={dev.id}>
-                      {dev.fullName} ({dev.email})
+                      {dev.fullName} ({dev.role || 'Staff'} - {dev.departmentName || 'IT'})
                     </option>
                   ))}
                 </select>
@@ -1004,6 +1055,10 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
+          categories={categories}
+          services={services}
+          applications={applications}
+          issueTypes={issueTypes}
           onSave={(payload) => {
             onItDirectModify(payload);
             setShowDirectModifyModal(false);

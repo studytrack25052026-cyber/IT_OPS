@@ -1,10 +1,21 @@
 import React, { useState, useMemo } from 'react';
-import { UserProfile, ChangeRequest, RequestStatus } from '../types';
+import {
+  UserProfile,
+  ChangeRequest,
+  RequestStatus,
+  CustomRoleDefinition,
+  CategoryMaster,
+  ServiceMaster,
+  ApplicationAssetMaster,
+  IssueTypeMaster,
+} from '../types';
 import { calculateRiskScore, getRiskBadgeClass } from '../utils/slaAndRisk';
 import { getPriorityWorkloadPoints } from '../utils/workloadScoring';
+import { formatDisplayDate } from '../utils/timezone';
+import { hasRolePermission, getEligibleDevelopers } from '../utils/rbac';
 import { ItDirectModifyModal, ItDirectModifyPayload } from './ItDirectModifyModal';
 import { StaffWorkloadReportView } from './StaffWorkloadReportView';
-import { mockUsers } from '../data/mockData';
+import { mockUsers } from '../data/db';
 import {
   Kanban,
   Clock,
@@ -41,6 +52,8 @@ import {
 interface DeveloperKanbanViewProps {
   currentUser: UserProfile;
   changeRequests: ChangeRequest[];
+  users?: UserProfile[];
+  customRoles?: CustomRoleDefinition[];
   onUpdateDevStatus: (
     crId: string,
     newStatus: RequestStatus,
@@ -54,16 +67,26 @@ interface DeveloperKanbanViewProps {
   onItDirectModify?: (payload: ItDirectModifyPayload) => void;
   onRejectCase?: (crId: string, rejectionReason: string) => void;
   onRequestClick: (crId: string) => void;
+  categories?: CategoryMaster[];
+  services?: ServiceMaster[];
+  applications?: ApplicationAssetMaster[];
+  issueTypes?: IssueTypeMaster[];
 }
 
 export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
   currentUser,
   changeRequests,
+  users,
+  customRoles = [],
   onUpdateDevStatus,
   onSendBackToRequester,
   onItDirectModify,
   onRejectCase,
   onRequestClick,
+  categories,
+  services,
+  applications,
+  issueTypes,
 }) => {
   const [selectedCr, setSelectedCr] = useState<ChangeRequest | null>(null);
   const [targetStatus, setTargetStatus] = useState<RequestStatus>('In Progress');
@@ -98,14 +121,20 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
   // Individual Workload Points Modal State
   const [showMyPointsModal, setShowMyPointsModal] = useState(false);
 
-  const developers = mockUsers.filter((u) => u.role === 'Software Developer');
+  // Dynamic developer list derived from live system users & Custom Roles Matrix
+  const developers = useMemo(() => {
+    const source = users && users.length > 0 ? users : mockUsers;
+    const eligible = getEligibleDevelopers(source, customRoles);
+    if (eligible.length > 0) return eligible;
+    return source.filter((u) => u.role === 'Software Developer' || u.role === 'IT Admin');
+  }, [users, customRoles]);
 
   // Filter active tasks assigned to dev or view all if IT Admin (exclude Closed cases)
-  const isItAdmin = currentUser.role === 'IT Admin' || currentUser.role === 'System Admin';
+  const canViewAllDevTasks = hasRolePermission(currentUser.role, 'canTriageAndAssignDevs', customRoles) || currentUser.role === 'System Admin';
   const devRequests = changeRequests.filter((cr) => {
     // Exclude closed cases from Dev Task Board
     if (cr.status === 'Closed (Completed)' || cr.status === 'Closed (Rejected)') return false;
-    if (isItAdmin) return cr.assignedDeveloperId !== undefined;
+    if (canViewAllDevTasks) return cr.assignedDeveloperId !== undefined;
     return cr.assignedDeveloperId === currentUser.id;
   });
 
@@ -174,7 +203,7 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
 
   const currentRisk = selectedCr
     ? calculateRiskScore({
-        affectedModulesCount: selectedCr.affectedModules.length,
+        affectedModulesCount: (selectedCr.affectedModules || []).length,
         priority: selectedCr.priority,
         downtimeRequired,
         schemaChangeRequired,
@@ -310,7 +339,7 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
 
                       <div className="text-[11px] text-slate-500 space-y-1 bg-slate-50 p-2 rounded border border-slate-200/70">
                         <div>Requester: {cr.requesterName}</div>
-                        <div>Target: {cr.targetCompletionDate || 'Not set'}</div>
+                        <div>Target: {cr.targetCompletionDate ? formatDisplayDate(cr.targetCompletionDate) : 'Not set'}</div>
                         {cr.assignedDeveloperName && (
                           <div className="text-slate-700 font-medium">Dev: {cr.assignedDeveloperName}</div>
                         )}
@@ -959,6 +988,10 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
+          categories={categories}
+          services={services}
+          applications={applications}
+          issueTypes={issueTypes}
           onSave={(payload) => {
             onItDirectModify(payload);
             setShowDirectModifyModal(false);

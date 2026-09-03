@@ -162,6 +162,12 @@ export const HowToUseView: React.FC<HowToUseViewProps> = ({
                     <td className="p-3 font-semibold text-slate-800">Final Release & IT Gate</td>
                   </tr>
                   <tr className="hover:bg-slate-50/50">
+                    <td className="p-3 font-bold text-slate-900">IT Helpdesk</td>
+                    <td className="p-3 text-slate-600">Frontline IT triage, request review & clarification, ticket routing, user assistance, and notification tracking.</td>
+                    <td className="p-3 font-mono text-slate-600">Organization Wide</td>
+                    <td className="p-3 text-slate-400">Triage & Support</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50/50">
                     <td className="p-3 font-bold text-slate-900">Software Developer</td>
                     <td className="p-3 text-slate-600">Implement code & database changes, update task board status, submit for verification.</td>
                     <td className="p-3 font-mono text-slate-600">Assigned Tasks</td>

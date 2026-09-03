@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   CategoryMaster,
   ServiceMaster,
@@ -20,6 +20,7 @@ import {
   MASTER_APPLICATION_SUBFUNCTIONS,
   MASTER_APPLICATION_PROCESSES,
 } from '../data/serviceCatalog';
+import { api } from '../services/api';
 import {
   FolderTree,
   Server,
@@ -65,6 +66,7 @@ interface ServiceCatalogAdminViewProps {
   onUpdateSubFunctions?: (sfs: ApplicationSubFunctionMaster[]) => void;
   processes?: ApplicationProcessMaster[];
   onUpdateProcesses?: (procs: ApplicationProcessMaster[]) => void;
+  initialCatalogTab?: 'categories' | 'services' | 'applications' | 'issuetypes' | 'appareas' | 'matrix';
 }
 
 export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = ({
@@ -83,8 +85,9 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
   onUpdateSubFunctions,
   processes: propProcesses,
   onUpdateProcesses,
+  initialCatalogTab = 'categories',
 }) => {
-  // Master state with prop or default initial data
+  // Master state initialized directly from props (database source of truth)
   const [categories, setCategories] = useState<CategoryMaster[]>(
     propCategories || MASTER_CATEGORIES
   );
@@ -92,24 +95,52 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
     propServices || MASTER_SERVICES
   );
   const [applications, setApplications] = useState<ApplicationAssetMaster[]>(
-    propApplications || MASTER_APPLICATIONS_ASSETS
+    propApplications || []
   );
   const [issueTypes, setIssueTypes] = useState<IssueTypeMaster[]>(
-    propIssueTypes || MASTER_ISSUE_TYPES
+    propIssueTypes || []
   );
   const [modules, setModules] = useState<ApplicationModuleMaster[]>(
-    propModules || MASTER_APPLICATION_MODULES
+    propModules || []
   );
   const [subFunctions, setSubFunctions] = useState<ApplicationSubFunctionMaster[]>(
-    propSubFunctions || MASTER_APPLICATION_SUBFUNCTIONS
+    propSubFunctions || []
   );
   const [processes, setProcesses] = useState<ApplicationProcessMaster[]>(
-    propProcesses || MASTER_APPLICATION_PROCESSES
+    propProcesses || []
   );
+
+  useEffect(() => {
+    if (propCategories) setCategories(propCategories);
+  }, [propCategories]);
+
+  useEffect(() => {
+    if (propServices) setServices(propServices);
+  }, [propServices]);
+
+  useEffect(() => {
+    if (propApplications) setApplications(propApplications);
+  }, [propApplications]);
+
+  useEffect(() => {
+    if (propIssueTypes) setIssueTypes(propIssueTypes);
+  }, [propIssueTypes]);
+
+  useEffect(() => {
+    if (propModules) setModules(propModules);
+  }, [propModules]);
+
+  useEffect(() => {
+    if (propSubFunctions) setSubFunctions(propSubFunctions);
+  }, [propSubFunctions]);
+
+  useEffect(() => {
+    if (propProcesses) setProcesses(propProcesses);
+  }, [propProcesses]);
 
   const [activeCatalogTab, setActiveCatalogTab] = useState<
     'categories' | 'services' | 'applications' | 'issuetypes' | 'appareas' | 'matrix'
-  >('categories');
+  >(initialCatalogTab);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [successToast, setSuccessToast] = useState<string | null>(null);
@@ -153,16 +184,71 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
   const [issueIsActiveInput, setIssueIsActiveInput] = useState(true);
   const [showIssueModal, setShowIssueModal] = useState(false);
 
+  // Hierarchy entity modals
+  const [showModuleModal, setShowModuleModal] = useState(false);
+  const [editModuleId, setEditModuleId] = useState<string | null>(null);
+  const [modNameInput, setModNameInput] = useState('');
+  const [modCodeInput, setModCodeInput] = useState('');
+  const [modDescInput, setModDescInput] = useState('');
+  const [modAppIdInput, setModAppIdInput] = useState(applications[0]?.id || '');
+
+  const [showSubFnModal, setShowSubFnModal] = useState(false);
+  const [editSubFnId, setEditSubFnId] = useState<string | null>(null);
+  const [subFnNameInput, setSubFnNameInput] = useState('');
+  const [subFnCodeInput, setSubFnCodeInput] = useState('');
+  const [subFnModIdInput, setSubFnModIdInput] = useState('');
+
+  const [showProcessModal, setShowProcessModal] = useState(false);
+  const [editProcessId, setEditProcessId] = useState<string | null>(null);
+  const [procNameInput, setProcNameInput] = useState('');
+  const [procCodeInput, setProcCodeInput] = useState('');
+  const [procSubFnIdInput, setProcSubFnIdInput] = useState('');
+
   // Application Area 3-Tier Hierarchy Explorer
   const [selectedHierarchyAppId, setSelectedHierarchyAppId] = useState<string>(
-    applications.find((a) => a.hasApplicationArea)?.id || 'app-pcs-net'
+    applications.find((a) => a.hasApplicationArea)?.id || applications[0]?.id || ''
   );
   const [selectedHierarchyModuleId, setSelectedHierarchyModuleId] = useState<string>(
-    modules[0]?.id || 'mod-pcs-107'
+    modules[0]?.id || ''
   );
   const [selectedHierarchySubFnId, setSelectedHierarchySubFnId] = useState<string>(
-    subFunctions[0]?.id || 'sf-pcs-cd2'
+    subFunctions[0]?.id || ''
   );
+
+  // Sync active selections when parent data updates
+  useEffect(() => {
+    if (applications.length > 0 && (!selectedHierarchyAppId || !applications.some((a) => a.id === selectedHierarchyAppId))) {
+      const nextApp = applications.find((a) => a.hasApplicationArea) || applications[0];
+      setSelectedHierarchyAppId(nextApp.id);
+    }
+  }, [applications, selectedHierarchyAppId]);
+
+  useEffect(() => {
+    if (selectedHierarchyAppId) {
+      const appMods = modules.filter((m) => m.applicationId === selectedHierarchyAppId);
+      if (appMods.length > 0) {
+        if (!appMods.some((m) => m.id === selectedHierarchyModuleId)) {
+          setSelectedHierarchyModuleId(appMods[0].id);
+        }
+      } else {
+        setSelectedHierarchyModuleId('');
+        setSelectedHierarchySubFnId('');
+      }
+    }
+  }, [selectedHierarchyAppId, modules, selectedHierarchyModuleId]);
+
+  useEffect(() => {
+    if (selectedHierarchyModuleId) {
+      const modSubs = subFunctions.filter((sf) => sf.moduleId === selectedHierarchyModuleId);
+      if (modSubs.length > 0) {
+        if (!modSubs.some((sf) => sf.id === selectedHierarchySubFnId)) {
+          setSelectedHierarchySubFnId(modSubs[0].id);
+        }
+      } else {
+        setSelectedHierarchySubFnId('');
+      }
+    }
+  }, [selectedHierarchyModuleId, subFunctions, selectedHierarchySubFnId]);
 
   // Filtered Lists
   const filteredCategories = useMemo(() => {
@@ -357,6 +443,31 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
     showToast('Application status updated.');
   };
 
+  const handleDeleteApplication = (id: string) => {
+    const target = applications.find((a) => a.id === id);
+    if (window.confirm(`Are you sure you want to delete Application/Asset "${target?.name || id}" and all its linked modules?`)) {
+      const updatedApps = applications.filter((a) => a.id !== id);
+      const updatedMods = modules.filter((m) => m.applicationId !== id);
+      const removedModIds = new Set(modules.filter((m) => m.applicationId === id).map((m) => m.id));
+      const updatedSubs = subFunctions.filter((sf) => !removedModIds.has(sf.moduleId));
+      const removedSubIds = new Set(subFunctions.filter((sf) => removedModIds.has(sf.moduleId)).map((sf) => sf.id));
+      const updatedProcs = processes.filter((p) => !removedSubIds.has(p.subFunctionId));
+
+      setApplications(updatedApps);
+      setModules(updatedMods);
+      setSubFunctions(updatedSubs);
+      setProcesses(updatedProcs);
+
+      if (onUpdateApplications) onUpdateApplications(updatedApps);
+      if (onUpdateModules) onUpdateModules(updatedMods);
+      if (onUpdateSubFunctions) onUpdateSubFunctions(updatedSubs);
+      if (onUpdateProcesses) onUpdateProcesses(updatedProcs);
+
+      api.deleteCatalogItem('applications', id).catch(() => {});
+      showToast(`Application "${target?.name || id}" deleted.`);
+    }
+  };
+
   // --------------------------------------------------------------------------
   // Issue Type Actions
   // --------------------------------------------------------------------------
@@ -413,6 +524,203 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
       setIssueTypes(updated);
       if (onUpdateIssueTypes) onUpdateIssueTypes(updated);
       showToast(`Issue Type "${target?.name || id}" removed.`);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // Module Actions
+  // --------------------------------------------------------------------------
+  const handleOpenAddModule = () => {
+    setEditModuleId(null);
+    setModNameInput('');
+    setModCodeInput('');
+    setModDescInput('');
+    setModAppIdInput(selectedHierarchyAppId || applications[0]?.id || '');
+    setShowModuleModal(true);
+  };
+
+  const handleSaveModule = () => {
+    if (!modNameInput.trim()) return;
+    const cleanName = modNameInput.trim();
+    let updated: ApplicationModuleMaster[];
+    if (editModuleId) {
+      updated = modules.map((m) =>
+        m.id === editModuleId
+          ? {
+              ...m,
+              name: cleanName,
+              code: modCodeInput.trim() || m.code,
+              description: modDescInput.trim(),
+              applicationId: modAppIdInput,
+            }
+          : m
+      );
+      showToast(`Module "${cleanName}" updated.`);
+    } else {
+      const newMod: ApplicationModuleMaster = {
+        id: `mod-${Date.now().toString().slice(-6)}`,
+        applicationId: modAppIdInput,
+        name: cleanName,
+        code: modCodeInput.trim() || cleanName,
+        description: modDescInput.trim() || `Module ${cleanName}`,
+        isActive: true,
+      };
+      updated = [...modules, newMod];
+      setSelectedHierarchyModuleId(newMod.id);
+      showToast(`Module "${cleanName}" created.`);
+    }
+    setModules(updated);
+    if (onUpdateModules) onUpdateModules(updated);
+    setShowModuleModal(false);
+  };
+
+  const handleDeleteModule = (id: string) => {
+    const target = modules.find((m) => m.id === id);
+    if (window.confirm(`Are you sure you want to delete Module "${target?.name || id}" and all its sub-functions and processes?`)) {
+      const updatedMods = modules.filter((m) => m.id !== id);
+      const updatedSubs = subFunctions.filter((sf) => sf.moduleId !== id);
+      const removedSubIds = new Set(subFunctions.filter((sf) => sf.moduleId === id).map((sf) => sf.id));
+      const updatedProcs = processes.filter((p) => !removedSubIds.has(p.subFunctionId));
+
+      setModules(updatedMods);
+      setSubFunctions(updatedSubs);
+      setProcesses(updatedProcs);
+
+      if (onUpdateModules) onUpdateModules(updatedMods);
+      if (onUpdateSubFunctions) onUpdateSubFunctions(updatedSubs);
+      if (onUpdateProcesses) onUpdateProcesses(updatedProcs);
+
+      if (selectedHierarchyModuleId === id) {
+        setSelectedHierarchyModuleId(updatedMods[0]?.id || '');
+      }
+      api.deleteCatalogItem('modules', id).catch(() => {});
+      showToast(`Module "${target?.name || id}" deleted.`);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // Sub-Function Actions
+  // --------------------------------------------------------------------------
+  const handleOpenAddSubFunction = () => {
+    if (!selectedHierarchyModuleId) {
+      showToast('Please select a Target Module first.');
+      return;
+    }
+    setEditSubFnId(null);
+    setSubFnNameInput('');
+    setSubFnCodeInput('');
+    setSubFnModIdInput(selectedHierarchyModuleId);
+    setShowSubFnModal(true);
+  };
+
+  const handleSaveSubFunction = () => {
+    if (!subFnNameInput.trim()) return;
+    const cleanName = subFnNameInput.trim();
+    let updated: ApplicationSubFunctionMaster[];
+    if (editSubFnId) {
+      updated = subFunctions.map((sf) =>
+        sf.id === editSubFnId
+          ? {
+              ...sf,
+              name: cleanName,
+              code: subFnCodeInput.trim() || sf.code,
+              moduleId: subFnModIdInput || selectedHierarchyModuleId,
+            }
+          : sf
+      );
+      showToast(`Sub-Function "${cleanName}" updated.`);
+    } else {
+      const newSub: ApplicationSubFunctionMaster = {
+        id: `sf-${Date.now().toString().slice(-6)}`,
+        moduleId: subFnModIdInput || selectedHierarchyModuleId,
+        name: cleanName,
+        code: subFnCodeInput.trim() || cleanName,
+        isActive: true,
+      };
+      updated = [...subFunctions, newSub];
+      setSelectedHierarchySubFnId(newSub.id);
+      showToast(`Sub-Function "${cleanName}" created.`);
+    }
+    setSubFunctions(updated);
+    if (onUpdateSubFunctions) onUpdateSubFunctions(updated);
+    setShowSubFnModal(false);
+  };
+
+  const handleDeleteSubFunction = (id: string) => {
+    const target = subFunctions.find((sf) => sf.id === id);
+    if (window.confirm(`Are you sure you want to delete Sub-Function "${target?.name || id}" and all its processes?`)) {
+      const updatedSubs = subFunctions.filter((sf) => sf.id !== id);
+      const updatedProcs = processes.filter((p) => p.subFunctionId !== id);
+
+      setSubFunctions(updatedSubs);
+      setProcesses(updatedProcs);
+
+      if (onUpdateSubFunctions) onUpdateSubFunctions(updatedSubs);
+      if (onUpdateProcesses) onUpdateProcesses(updatedProcs);
+
+      if (selectedHierarchySubFnId === id) {
+        setSelectedHierarchySubFnId(updatedSubs.find((sf) => sf.moduleId === selectedHierarchyModuleId)?.id || '');
+      }
+      api.deleteCatalogItem('subfunctions', id).catch(() => {});
+      showToast(`Sub-Function "${target?.name || id}" deleted.`);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // Process Actions
+  // --------------------------------------------------------------------------
+  const handleOpenAddProcess = () => {
+    if (!selectedHierarchySubFnId) {
+      showToast('Please select a Sub-Function first.');
+      return;
+    }
+    setEditProcessId(null);
+    setProcNameInput('');
+    setProcCodeInput('');
+    setProcSubFnIdInput(selectedHierarchySubFnId);
+    setShowProcessModal(true);
+  };
+
+  const handleSaveProcess = () => {
+    if (!procNameInput.trim()) return;
+    const cleanName = procNameInput.trim();
+    let updated: ApplicationProcessMaster[];
+    if (editProcessId) {
+      updated = processes.map((p) =>
+        p.id === editProcessId
+          ? {
+              ...p,
+              name: cleanName,
+              code: procCodeInput.trim() || p.code,
+              subFunctionId: procSubFnIdInput || selectedHierarchySubFnId,
+            }
+          : p
+      );
+      showToast(`Process "${cleanName}" updated.`);
+    } else {
+      const newProc: ApplicationProcessMaster = {
+        id: `p-${Date.now().toString().slice(-6)}`,
+        subFunctionId: procSubFnIdInput || selectedHierarchySubFnId,
+        name: cleanName,
+        code: procCodeInput.trim() || cleanName,
+        isActive: true,
+      };
+      updated = [...processes, newProc];
+      showToast(`Process "${cleanName}" created.`);
+    }
+    setProcesses(updated);
+    if (onUpdateProcesses) onUpdateProcesses(updated);
+    setShowProcessModal(false);
+  };
+
+  const handleDeleteProcess = (id: string) => {
+    const target = processes.find((p) => p.id === id);
+    if (window.confirm(`Are you sure you want to delete Process "${target?.name || id}"?`)) {
+      const updated = processes.filter((p) => p.id !== id);
+      setProcesses(updated);
+      if (onUpdateProcesses) onUpdateProcesses(updated);
+      api.deleteCatalogItem('processes', id).catch(() => {});
+      showToast(`Process "${target?.name || id}" deleted.`);
     }
   };
 
@@ -850,22 +1158,31 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                         </button>
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          onClick={() => {
-                            setEditAppId(app.id);
-                            setAppNameInput(app.name);
-                            setAppCodeInput(app.code);
-                            setAppSrvIdInput(app.serviceId);
-                            setAppAssetTagInput(app.assetTag || '');
-                            setAppHasAreaInput(!!app.hasApplicationArea);
-                            setAppDescInput(app.description || '');
-                            setShowAppModal(true);
-                          }}
-                          className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer inline-flex items-center space-x-1"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                          <span className="text-[11px] font-semibold">Edit</span>
-                        </button>
+                        <div className="inline-flex items-center space-x-1">
+                          <button
+                            onClick={() => {
+                              setEditAppId(app.id);
+                              setAppNameInput(app.name);
+                              setAppCodeInput(app.code);
+                              setAppSrvIdInput(app.serviceId);
+                              setAppAssetTagInput(app.assetTag || '');
+                              setAppHasAreaInput(!!app.hasApplicationArea);
+                              setAppDescInput(app.description || '');
+                              setShowAppModal(true);
+                            }}
+                            className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer inline-flex items-center space-x-1"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                            <span className="text-[11px] font-semibold">Edit</span>
+                          </button>
+                          <button
+                            onClick={() => handleDeleteApplication(app.id)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                            title="Delete Application"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -979,10 +1296,36 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                 <h3 className="text-base font-bold">Application Area Technical Matrix Configurator</h3>
               </div>
               <p className="text-xs text-indigo-200 mt-1">
-                Configure hierarchical 3-tier mapping (Module ➔ Sub-Function ➔ Process) for Tanaka Business Applications.
+                Configure data-driven 3-tier mapping (Module ➔ Sub-Function ➔ Process) for any Application Asset.
               </p>
             </div>
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center space-x-2 bg-indigo-950/60 p-1.5 rounded-xl border border-indigo-700/50">
+                <span className="text-xs text-indigo-300 font-bold pl-2">Target Application:</span>
+                <select
+                  value={selectedHierarchyAppId}
+                  onChange={(e) => {
+                    const newAppId = e.target.value;
+                    setSelectedHierarchyAppId(newAppId);
+                    const appMods = modules.filter((m) => m.applicationId === newAppId);
+                    if (appMods.length > 0) {
+                      setSelectedHierarchyModuleId(appMods[0].id);
+                      const modSubs = subFunctions.filter((sf) => sf.moduleId === appMods[0].id);
+                      setSelectedHierarchySubFnId(modSubs[0]?.id || '');
+                    } else {
+                      setSelectedHierarchyModuleId('');
+                      setSelectedHierarchySubFnId('');
+                    }
+                  }}
+                  className="bg-indigo-800 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                >
+                  {applications.map((app) => (
+                    <option key={app.id} value={app.id}>
+                      {app.name} ({app.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
               <span className="text-xs bg-indigo-800/80 px-3 py-1.5 rounded-xl border border-indigo-700 text-indigo-200">
                 {modules.length} Modules • {subFunctions.length} Sub-Functions • {processes.length} Processes
               </span>
@@ -995,28 +1338,67 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
               <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                 <span className="text-xs font-bold text-slate-900 flex items-center space-x-1.5">
                   <span className="p-1 bg-blue-100 text-blue-700 rounded font-mono text-[10px]">1</span>
-                  <span>Target Modules ({modules.length})</span>
+                  <span>
+                    Modules ({modules.filter((m) => selectedHierarchyAppId === 'all' ? true : m.applicationId === selectedHierarchyAppId).length})
+                  </span>
                 </span>
+                <button
+                  type="button"
+                  onClick={handleOpenAddModule}
+                  className="inline-flex items-center space-x-1 text-[11px] font-bold bg-blue-50 text-blue-700 hover:bg-blue-100 px-2 py-1 rounded-lg border border-blue-200 cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Module</span>
+                </button>
               </div>
 
               <div className="space-y-1 max-h-96 overflow-y-auto pr-1">
-                {modules.map((m) => (
-                  <div
-                    key={m.id}
-                    onClick={() => setSelectedHierarchyModuleId(m.id)}
-                    className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between ${
-                      selectedHierarchyModuleId === m.id
-                        ? 'bg-blue-50 border-blue-300 text-blue-950 font-bold shadow-2xs'
-                        : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div>
-                      <span className="block font-bold">{m.name}</span>
-                      <span className="text-[10px] text-slate-400 block">{m.description}</span>
+                {modules
+                  .filter((m) => selectedHierarchyAppId === 'all' ? true : m.applicationId === selectedHierarchyAppId)
+                  .map((m) => (
+                    <div
+                      key={m.id}
+                      onClick={() => {
+                        setSelectedHierarchyModuleId(m.id);
+                        const modSubs = subFunctions.filter((sf) => sf.moduleId === m.id);
+                        if (modSubs.length > 0) {
+                          setSelectedHierarchySubFnId(modSubs[0].id);
+                        } else {
+                          setSelectedHierarchySubFnId('');
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between group ${
+                        selectedHierarchyModuleId === m.id
+                          ? 'bg-blue-50 border-blue-300 text-blue-950 font-bold shadow-2xs'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1 pr-2">
+                        <span className="block font-bold truncate">{m.name}</span>
+                        {m.description && <span className="text-[10px] text-slate-400 block truncate">{m.description}</span>}
+                      </div>
+                      <div className="flex items-center space-x-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteModule(m.id);
+                          }}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                          title="Delete module"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                      </div>
                     </div>
-                    <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  ))}
+
+                {modules.filter((m) => selectedHierarchyAppId === 'all' ? true : m.applicationId === selectedHierarchyAppId).length === 0 && (
+                  <div className="p-4 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
+                    No modules defined for this application yet. Click "+ Add Module" to create one.
                   </div>
-                ))}
+                )}
               </div>
             </div>
 
@@ -1027,6 +1409,15 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                   <span className="p-1 bg-indigo-100 text-indigo-700 rounded font-mono text-[10px]">2</span>
                   <span>Sub-Functions</span>
                 </span>
+                <button
+                  type="button"
+                  disabled={!selectedHierarchyModuleId}
+                  onClick={handleOpenAddSubFunction}
+                  className="inline-flex items-center space-x-1 text-[11px] font-bold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50 px-2 py-1 rounded-lg border border-indigo-200 cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Sub-Function</span>
+                </button>
               </div>
 
               <div className="space-y-1 max-h-96 overflow-y-auto pr-1">
@@ -1036,20 +1427,33 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                     <div
                       key={sf.id}
                       onClick={() => setSelectedHierarchySubFnId(sf.id)}
-                      className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between ${
+                      className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between group ${
                         selectedHierarchySubFnId === sf.id
                           ? 'bg-indigo-50 border-indigo-300 text-indigo-950 font-bold shadow-2xs'
                           : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                       }`}
                     >
-                      <span>{sf.name}</span>
-                      <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="truncate pr-2">{sf.name}</span>
+                      <div className="flex items-center space-x-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteSubFunction(sf.id);
+                          }}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                          title="Delete sub-function"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
+                      </div>
                     </div>
                   ))}
 
                 {subFunctions.filter((sf) => sf.moduleId === selectedHierarchyModuleId).length === 0 && (
                   <div className="p-4 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
-                    No sub-functions defined for this module yet.
+                    {selectedHierarchyModuleId ? 'No sub-functions defined. Click "+ Add Sub-Function".' : 'Select a Target Module above.'}
                   </div>
                 )}
               </div>
@@ -1062,6 +1466,15 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                   <span className="p-1 bg-emerald-100 text-emerald-700 rounded font-mono text-[10px]">3</span>
                   <span>Processes / Functions</span>
                 </span>
+                <button
+                  type="button"
+                  disabled={!selectedHierarchySubFnId}
+                  onClick={handleOpenAddProcess}
+                  className="inline-flex items-center space-x-1 text-[11px] font-bold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 px-2 py-1 rounded-lg border border-emerald-200 cursor-pointer transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Process</span>
+                </button>
               </div>
 
               <div className="space-y-1.5 max-h-96 overflow-y-auto pr-1">
@@ -1070,16 +1483,26 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                   .map((p) => (
                     <div
                       key={p.id}
-                      className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800 flex items-center justify-between shadow-2xs"
+                      className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800 flex items-center justify-between shadow-2xs group hover:bg-white"
                     >
-                      <span>{p.name}</span>
-                      <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="truncate pr-2">{p.name}</span>
+                      <div className="flex items-center space-x-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProcess(p.id)}
+                          className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                          title="Delete process"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                        <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      </div>
                     </div>
                   ))}
 
                 {processes.filter((p) => p.subFunctionId === selectedHierarchySubFnId).length === 0 && (
                   <div className="p-4 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
-                    Select a sub-function with configured processes.
+                    {selectedHierarchySubFnId ? 'No processes defined. Click "+ Add Process".' : 'Select a Sub-Function on the left.'}
                   </div>
                 )}
               </div>
@@ -1568,6 +1991,241 @@ export const ServiceCatalogAdminView: React.FC<ServiceCatalogAdminViewProps> = (
                 className="px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 cursor-pointer shadow-xs"
               >
                 Save Issue Type
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ==================================================================== */}
+      {/* MODAL: ADD / EDIT MODULE */}
+      {/* ==================================================================== */}
+      {showModuleModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-sm text-slate-900">
+                {editModuleId ? 'Edit Target Module' : 'Add New Target Module'}
+              </h3>
+              <button
+                onClick={() => setShowModuleModal(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Target Application *</label>
+                <select
+                  value={modAppIdInput}
+                  onChange={(e) => setModAppIdInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                >
+                  {applications.map((app) => (
+                    <option key={app.id} value={app.id}>
+                      {app.name} ({app.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Module Name *</label>
+                <input
+                  type="text"
+                  value={modNameInput}
+                  onChange={(e) => setModNameInput(e.target.value)}
+                  placeholder="e.g. 107_PCS.NET, Order Management, Core Banking..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Code</label>
+                <input
+                  type="text"
+                  value={modCodeInput}
+                  onChange={(e) => setModCodeInput(e.target.value)}
+                  placeholder="e.g. MOD-01"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Description</label>
+                <textarea
+                  rows={2}
+                  value={modDescInput}
+                  onChange={(e) => setModDescInput(e.target.value)}
+                  placeholder="Module details..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setShowModuleModal(false)}
+                className="px-4 py-2 border border-slate-300 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveModule}
+                className="px-4 py-2 bg-blue-600 text-white text-xs font-bold rounded-xl hover:bg-blue-700 cursor-pointer shadow-xs"
+              >
+                Save Module
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* MODAL: ADD / EDIT SUB-FUNCTION */}
+      {/* ==================================================================== */}
+      {showSubFnModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-sm text-slate-900">
+                {editSubFnId ? 'Edit Sub-Function' : 'Add New Sub-Function'}
+              </h3>
+              <button
+                onClick={() => setShowSubFnModal(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Parent Module *</label>
+                <select
+                  value={subFnModIdInput}
+                  onChange={(e) => setSubFnModIdInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                >
+                  {modules.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Sub-Function Name *</label>
+                <input
+                  type="text"
+                  value={subFnNameInput}
+                  onChange={(e) => setSubFnNameInput(e.target.value)}
+                  placeholder="e.g. CD2 Wire, Inventory Control, Invoicing..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Code</label>
+                <input
+                  type="text"
+                  value={subFnCodeInput}
+                  onChange={(e) => setSubFnCodeInput(e.target.value)}
+                  placeholder="e.g. SF-01"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setShowSubFnModal(false)}
+                className="px-4 py-2 border border-slate-300 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveSubFunction}
+                className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-xl hover:bg-indigo-700 cursor-pointer shadow-xs"
+              >
+                Save Sub-Function
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* MODAL: ADD / EDIT PROCESS */}
+      {/* ==================================================================== */}
+      {showProcessModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-sm text-slate-900">
+                {editProcessId ? 'Edit Process / Function' : 'Add New Process / Function'}
+              </h3>
+              <button
+                onClick={() => setShowProcessModal(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Parent Sub-Function *</label>
+                <select
+                  value={procSubFnIdInput}
+                  onChange={(e) => setProcSubFnIdInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                >
+                  {subFunctions.map((sf) => (
+                    <option key={sf.id} value={sf.id}>
+                      {sf.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Process / Function Name *</label>
+                <input
+                  type="text"
+                  value={procNameInput}
+                  onChange={(e) => setProcNameInput(e.target.value)}
+                  placeholder="e.g. Wire Cutting, Quality Inspection, Batch Posting..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Code</label>
+                <input
+                  type="text"
+                  value={procCodeInput}
+                  onChange={(e) => setProcCodeInput(e.target.value)}
+                  placeholder="e.g. PROC-01"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setShowProcessModal(false)}
+                className="px-4 py-2 border border-slate-300 text-slate-600 text-xs font-bold rounded-xl hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveProcess}
+                className="px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl hover:bg-emerald-700 cursor-pointer shadow-xs"
+              >
+                Save Process
               </button>
             </div>
           </div>

@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { ChangeRequest, UserProfile, TemporaryApproverDelegation } from '../types';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { ChangeRequest, UserProfile, TemporaryApproverDelegation, SystemTurnaroundMetrics } from '../types';
 import {
   BarChart3,
   Download,
@@ -21,9 +21,13 @@ import {
   User,
   ShieldCheck,
   AlertCircle,
-  Lock
+  Lock,
+  RefreshCw,
+  Database,
+  Activity
 } from 'lucide-react';
 import { StaffWorkloadReportView } from './StaffWorkloadReportView';
+import { formatDisplayDateTime, formatDisplayDate } from '../utils/timezone';
 
 interface ReportsViewProps {
   changeRequests: ChangeRequest[];
@@ -39,6 +43,126 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   delegations: propsDelegations,
 }) => {
   const [activeReportTab, setActiveReportTab] = useState<'turnaround' | 'delegations' | 'workload'>('turnaround');
+  
+  // Backend SLA Turnaround Live Metrics State
+  const [slaMetrics, setSlaMetrics] = useState<SystemTurnaroundMetrics | null>(null);
+  const [isLoadingMetrics, setIsLoadingMetrics] = useState<boolean>(false);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+
+  // Fetch Live Metrics from Backend PostgreSQL API
+  const fetchLiveMetrics = useCallback(async () => {
+    setIsLoadingMetrics(true);
+    setMetricsError(null);
+    try {
+      const response = await fetch('/api/reports/turnaround-metrics');
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.success && data.data) {
+        setSlaMetrics(data.data);
+        setLastFetchedAt(new Date().toLocaleTimeString());
+      } else {
+        throw new Error(data.message || 'Failed to calculate turnaround metrics');
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[ReportsView] Backend metrics fetch fallback:', errorMsg);
+      setMetricsError(errorMsg);
+      
+      // Compute fallback from local changeRequests data
+      const evaluatedHOD: number[] = [];
+      const evaluatedDev: number[] = [];
+      let compliantHodCount = 0;
+      let compliantDevCount = 0;
+
+      changeRequests.forEach((cr) => {
+        // HOD Clearance calculation
+        let approvedAt: Date | null = cr.hodApprovedAt ? new Date(cr.hodApprovedAt) : null;
+        if (!approvedAt && cr.approvalHistory && cr.approvalHistory.length > 0) {
+          const h = cr.approvalHistory.find((item) =>
+            ['Approved', 'Endorsed', 'Approved by HOD', 'Approved by Delegate'].includes(item.decision)
+          );
+          if (h?.actionDate) approvedAt = new Date(h.actionDate);
+        }
+        if (approvedAt && cr.createdAt) {
+          const cDate = new Date(cr.createdAt);
+          const hours = (approvedAt.getTime() - cDate.getTime()) / (1000 * 3600);
+          if (hours >= 0) {
+            evaluatedHOD.push(hours);
+            if (hours <= 48) compliantHodCount++;
+          }
+        }
+
+        // Dev Cycle calculation
+        let devStart: Date | null = null;
+        let devEnd: Date | null = cr.actualCompletionDate ? new Date(cr.actualCompletionDate) : null;
+        if (cr.approvalHistory && cr.approvalHistory.length > 0) {
+          const s = cr.approvalHistory.find((item) => item.toStatus === 'In Progress' || item.decision === 'Assigned Developer');
+          if (s?.actionDate) devStart = new Date(s.actionDate);
+          if (!devEnd) {
+            const e = cr.approvalHistory.find((item) => ['Pending IT Verification', 'Closed (Completed)'].includes(item.toStatus));
+            if (e?.actionDate) devEnd = new Date(e.actionDate);
+          }
+        }
+        if (!devStart && cr.hodApprovedAt) devStart = new Date(cr.hodApprovedAt);
+        if (!devStart && cr.createdAt) devStart = new Date(cr.createdAt);
+        if (!devEnd && (cr.status === 'Closed (Completed)' || cr.status === 'Pending IT Verification')) {
+          devEnd = cr.updatedAt ? new Date(cr.updatedAt) : new Date();
+        }
+        if (devStart && devEnd) {
+          const hours = (devEnd.getTime() - devStart.getTime()) / (1000 * 3600);
+          if (hours >= 0) {
+            evaluatedDev.push(hours);
+            const targetHours = cr.slaTargetHours || 168;
+            if (hours <= targetHours) compliantDevCount++;
+          }
+        }
+      });
+
+      const avgHodDays = evaluatedHOD.length > 0 ? Number(((evaluatedHOD.reduce((a, b) => a + b, 0) / evaluatedHOD.length) / 24).toFixed(1)) : 0.0;
+      const hodSlaPercent = evaluatedHOD.length > 0 ? Number(((compliantHodCount / evaluatedHOD.length) * 100).toFixed(1)) : 100.0;
+
+      const avgDevDays = evaluatedDev.length > 0 ? Number(((evaluatedDev.reduce((a, b) => a + b, 0) / evaluatedDev.length) / 24).toFixed(1)) : 0.0;
+      const devSlaPercent = evaluatedDev.length > 0 ? Number(((compliantDevCount / evaluatedDev.length) * 100).toFixed(1)) : 100.0;
+
+      const completed = changeRequests.filter((cr) => cr.status === 'Closed (Completed)').length;
+      const rejected = changeRequests.filter((cr) => cr.status === 'Closed (Rejected)').length;
+
+      setSlaMetrics({
+        avgHodClearanceDays: avgHodDays,
+        hodClearanceDisplay: evaluatedHOD.length > 0 ? `${avgHodDays} Days` : '0.0 Days',
+        hodSlaCompliancePercent: hodSlaPercent,
+        hodSlaComplianceDisplay: evaluatedHOD.length > 0 ? `${hodSlaPercent}% SLA Compliance (< 2 Days)` : '100% SLA Compliance (< 2 Days)',
+        hodEvaluatedCount: evaluatedHOD.length,
+        avgItDevCycleDays: avgDevDays,
+        itDevCycleDisplay: evaluatedDev.length > 0 ? `${avgDevDays} Days` : '0.0 Days',
+        itDevSlaCompliancePercent: devSlaPercent,
+        itDevSlaComplianceDisplay: evaluatedDev.length > 0 ? `${devSlaPercent}% within target SLA release window` : 'Within target release window',
+        itEvaluatedCount: evaluatedDev.length,
+        totalClosedCases: completed,
+        completedCount: completed,
+        rejectedCount: rejected,
+        totalCases: changeRequests.length,
+        verificationRatePercent: 100,
+        verificationDisplay: '100% verified by IT Admin',
+        priorityDistribution: { Critical: 0, High: 0, Medium: 0, Low: 0 },
+        statusDistribution: {},
+        avgOverallResolutionDays: Number((avgHodDays + avgDevDays).toFixed(1)),
+        calculatedAt: new Date().toISOString(),
+        source: 'fallback_computed',
+      });
+      setLastFetchedAt(new Date().toLocaleTimeString());
+    } finally {
+      setIsLoadingMetrics(false);
+    }
+  }, [changeRequests]);
+
+  // Fetch on mount or when tab is active
+  useEffect(() => {
+    fetchLiveMetrics();
+  }, [fetchLiveMetrics]);
   
   // Delegation Audit Filtering State
   const [delegationSearch, setDelegationSearch] = useState('');
@@ -111,7 +235,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `PCS_Change_Requests_SLA_Report_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `IT_OPS_Change_Requests_SLA_Report_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -165,9 +289,9 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
 
     const fileNamePrefix = isSystemAdmin
       ? delegationDeptFilter !== 'ALL'
-        ? `PCS_${delegationDeptFilter.replace(/\s+/g, '_')}_Delegations_Audit_`
-        : 'PCS_All_Departments_Delegations_Audit_'
-      : `PCS_${(userDeptName || 'Department').replace(/\s+/g, '_')}_Delegations_Audit_`;
+        ? `IT_OPS_${delegationDeptFilter.replace(/\s+/g, '_')}_Delegations_Audit_`
+        : 'IT_OPS_All_Departments_Delegations_Audit_'
+      : `IT_OPS_${(userDeptName || 'Department').replace(/\s+/g, '_')}_Delegations_Audit_`;
 
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
@@ -317,17 +441,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                
                 
-                {isSystemAdmin ? (
-                  <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30 flex items-center gap-1">
-                    <ShieldCheck className="w-3 h-3" />
-                    <span>Enterprise Admin Oversight</span>
-                  </span>
-                ) : (
-                  <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                    <Lock className="w-3 h-3" />
-                    <span>Department Scoped: {userDeptName || 'My Department'}</span>
-                  </span>
-                )}
+                
               </div>
               <h1 className="text-2xl font-bold">
                 Temporary Approver & Delegation Audit
@@ -335,11 +449,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                   <span className="text-slate-300 font-normal text-lg ml-2">({userDeptName} Department)</span>
                 )}
               </h1>
-              <p className="text-xs text-slate-300">
-                {isSystemAdmin
-                  ? 'Enterprise audit register of all HOD temporary approver assignments, active periods, and early revocations across all departments.'
-                  : `Immutable audit register of ${userDeptName || 'your department'}'s HOD temporary approver assignments, active periods, and early revocations.`}
-              </p>
+             
             </div>
 
             <button
@@ -355,17 +465,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
             </button>
           </div>
 
-          {/* Department Access Notice */}
-          {!isSystemAdmin && (
-            <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-900">
-              <Lock className="w-4 h-4 text-blue-600 shrink-0" />
-              <div className="flex-1">
-                <span className="font-bold">Department Data Scoping Active:</span> You are viewing the audit register for{' '}
-                <span className="font-semibold underline decoration-blue-400">{userDeptName || 'your department'}</span> only. All cross-department records are securely isolated.
-              </div>
-            </div>
-          )}
-
+          
           {/* KPI Summary Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs">
             <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-1">
@@ -408,9 +508,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                     {!isSystemAdmin && userDeptName && ` - ${userDeptName}`}
                   </span>
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Showing {filteredDelegations.length} of {scopedDelegations.length} {isSystemAdmin ? 'total' : 'department'} delegation audit records
-                </p>
+               
               </div>
 
               {/* Status Filter Buttons */}
@@ -542,7 +640,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                           </p>
                           <p className="text-xs text-slate-500">
                             {scopedDelegations.length === 0
-                              ? 'When HODs in your department grant or revoke temporary approver privileges, records will appear here.'
+                              ? ''
                               : 'Try adjusting your search terms or filter selection.'}
                           </p>
                         </div>
@@ -593,10 +691,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                           <td className="p-3 whitespace-nowrap">
                             <div className="space-y-0.5">
                               <span className="text-slate-800 font-medium block">
-                                {del.startDate.split(' ')[0]} → {del.endDate.split(' ')[0]}
+                                {formatDisplayDate(del.startDate)} → {formatDisplayDate(del.endDate)}
                               </span>
                               <span className="text-[10px] text-slate-400">
-                                Created: {del.createdAt}
+                                Created: {formatDisplayDateTime(del.createdAt)}
                               </span>
                             </div>
                           </td>
@@ -676,13 +774,7 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
               </table>
             </div>
 
-            {/* Informational Compliance Footer */}
-            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-600 flex items-start space-x-2 text-[11px]">
-              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-              <div>
-                <strong>Compliance & Audit Integrity:</strong> All temporary approver assignments and early revocations executed by Department HODs are immutable system audit records. Data in this tab is maintained as <strong>List Info Only</strong> for corporate oversight and ISO/compliance verification.
-              </div>
-            </div>
+           
           </div>
         </div>
       )}
@@ -693,41 +785,107 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           {/* Banner */}
           <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-2xl p-6 border border-blue-800/50 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-bold">System Reports & SLA Turnaround</h1>
-              <p className="text-xs text-blue-100/80 mt-0.5">
-                Audit turnaround performance metrics, priority distributions, and export full case records.
+              <div className="flex items-center gap-2 mb-1">
+                <h1 className="text-2xl font-bold">System Reports & SLA Turnaround</h1>
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                 
+                </span>
+              </div>
+              <p className="text-xs text-blue-100/80">
+                Authoritative turnaround performance metrics, HOD clearance durations, IT dev cycles, and priority audit registers.
               </p>
             </div>
 
-            <button
-              onClick={exportCrToCSV}
-              className="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2.5 rounded-xl shadow-md text-xs transition-all shrink-0 cursor-pointer"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>Export Audit to CSV</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={fetchLiveMetrics}
+                disabled={isLoadingMetrics}
+                title="Refresh Live SLA Calculation from Database"
+                className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium px-3 py-2 rounded-xl shadow-sm text-xs transition-all cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMetrics ? 'animate-spin text-blue-400' : ''}`} />
+                <span>{isLoadingMetrics ? 'Calculating...' : 'Recalculate'}</span>
+              </button>
+
+              <button
+                onClick={exportCrToCSV}
+                className="flex items-center space-x-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2 rounded-xl shadow-md text-xs transition-all cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>Export Audit to CSV</span>
+              </button>
+            </div>
           </div>
 
-          {/* SLA Metric Cards */}
+          {/* SLA Metric Cards (Computed by PostgreSQL backend) */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1">
-              <span className="text-slate-500 font-semibold block">Average HOD Clearance Time</span>
-              <p className="text-2xl font-extrabold text-slate-900">1.2 Days</p>
-              <span className="text-emerald-600 font-medium">98% SLA Compliance (&lt; 2 Days)</span>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1 relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 font-semibold block">Average HOD Clearance Time</span>
+                <Clock className="w-4 h-4 text-slate-400" />
+              </div>
+              <p className="text-2xl font-extrabold text-slate-900">
+                {isLoadingMetrics ? (
+                  <span className="inline-block w-20 h-7 bg-slate-200 animate-pulse rounded"></span>
+                ) : (
+                  slaMetrics?.hodClearanceDisplay || '0.0 Days'
+                )}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-emerald-600 font-semibold">
+                  {slaMetrics?.hodSlaComplianceDisplay || '100% SLA Compliance (< 2 Days)'}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  {slaMetrics?.hodEvaluatedCount ?? 0} HOD reviews evaluated
+                </span>
+              </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1">
-              <span className="text-slate-500 font-semibold block">Average IT Dev Cycle</span>
-              <p className="text-2xl font-extrabold text-blue-600">5.4 Days</p>
-              <span className="text-blue-600 font-medium">Within target release window</span>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1 relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 font-semibold block">Average IT Dev Cycle</span>
+                <Activity className="w-4 h-4 text-blue-500" />
+              </div>
+              <p className="text-2xl font-extrabold text-blue-600">
+                {isLoadingMetrics ? (
+                  <span className="inline-block w-20 h-7 bg-blue-100 animate-pulse rounded"></span>
+                ) : (
+                  slaMetrics?.itDevCycleDisplay || '0.0 Days'
+                )}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-blue-600 font-semibold">
+                  {slaMetrics?.itDevSlaComplianceDisplay || 'Within target release window'}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  {slaMetrics?.itEvaluatedCount ?? 0} developer cycles recorded
+                </span>
+              </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1">
-              <span className="text-slate-500 font-semibold block">Total Closed Cases</span>
-              <p className="text-2xl font-extrabold text-emerald-600">{completedCount}</p>
-              <span className="text-slate-500">100% verified by IT Admin</span>
+            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-1 relative overflow-hidden">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 font-semibold block">Total Closed Cases</span>
+                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+              </div>
+              <p className="text-2xl font-extrabold text-emerald-600">
+                {isLoadingMetrics ? (
+                  <span className="inline-block w-20 h-7 bg-emerald-100 animate-pulse rounded"></span>
+                ) : (
+                  slaMetrics?.totalClosedCases ?? completedCount
+                )}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-slate-600 font-medium">
+                  {slaMetrics?.verificationDisplay || '100% verified by IT Admin'}
+                </span>
+                <span className="text-[10px] text-slate-400">
+                  {slaMetrics?.completedCount ?? completedCount} Completed · {slaMetrics?.rejectedCount ?? 0} Rejected
+                </span>
+              </div>
             </div>
           </div>
+
 
           {/* Detail Audit Table */}
           <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 space-y-4">

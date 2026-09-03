@@ -1,8 +1,18 @@
-import React, { useState } from 'react';
-import { ChangeRequest, UserProfile } from '../types';
-import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass } from '../utils/slaAndRisk';
+import React, { useState, useMemo } from 'react';
+import {
+  ChangeRequest,
+  UserProfile,
+  CustomRoleDefinition,
+  CategoryMaster,
+  ServiceMaster,
+  ApplicationAssetMaster,
+  IssueTypeMaster,
+} from '../types';
+import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass, getChaseStageInfo } from '../utils/slaAndRisk';
+import { formatDisplayDateTime, formatDisplayDate } from '../utils/timezone';
+import { hasRolePermission, getEligibleDevelopers } from '../utils/rbac';
 import { ItDirectModifyModal, ItDirectModifyPayload } from './ItDirectModifyModal';
-import { mockUsers } from '../data/mockData';
+import { mockUsers } from '../data/db';
 import {
   X,
   FileText,
@@ -35,7 +45,12 @@ import {
   Sliders,
   ArrowUpRight,
   ShieldX,
-  Code2
+  Code2,
+  Edit,
+  PauseCircle,
+  BellRing,
+  AlertOctagon,
+  Hourglass,
 } from 'lucide-react';
 
 interface RequestDetailModalProps {
@@ -43,26 +58,49 @@ interface RequestDetailModalProps {
   onClose: () => void;
   currentUser: UserProfile;
   developers?: UserProfile[];
+  users?: UserProfile[];
+  customRoles?: CustomRoleDefinition[];
   changeRequests?: ChangeRequest[];
   onNavigateTab?: (tab: string) => void;
+  onEditRequest?: (cr: ChangeRequest) => void;
   onSendBackToRequester?: (crId: string, comments: string) => void;
   onItDirectModify?: (payload: ItDirectModifyPayload) => void;
   onRejectCase?: (crId: string, rejectionReason: string) => void;
   onReopenCase?: (crId: string, reopenComments: string) => void;
+  onSendReminderNudge?: (crId: string, stage: 1 | 2 | 3, customNote?: string) => void;
+  onAutoCloseInactive?: (crId: string, reason: string) => void;
+  categories?: CategoryMaster[];
+  services?: ServiceMaster[];
+  applications?: ApplicationAssetMaster[];
+  issueTypes?: IssueTypeMaster[];
 }
 
 export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   changeRequest,
   onClose,
   currentUser,
-  developers = mockUsers.filter((u) => u.role === 'Software Developer'),
+  developers: propDevelopers,
+  users,
+  customRoles = [],
   changeRequests,
   onNavigateTab,
+  onEditRequest,
   onSendBackToRequester,
   onItDirectModify,
   onRejectCase,
   onReopenCase,
+  onSendReminderNudge,
+  onAutoCloseInactive,
+  categories,
+  services,
+  applications,
+  issueTypes,
 }) => {
+  const developers = useMemo(() => {
+    if (propDevelopers && propDevelopers.length > 0) return propDevelopers;
+    const source = users && users.length > 0 ? users : mockUsers;
+    return getEligibleDevelopers(source, customRoles);
+  }, [propDevelopers, users, customRoles]);
   const [showDiffModal, setShowDiffModal] = useState(false);
   const [showClarifyModal, setShowClarifyModal] = useState(false);
   const [showItModifyModal, setShowItModifyModal] = useState(false);
@@ -76,7 +114,31 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   const [showItStorageInspector, setShowItStorageInspector] = useState(false);
   const [copiedAttId, setCopiedAttId] = useState<string | null>(null);
 
-  const isItOrSystemAdmin = currentUser.role === 'IT Admin' || currentUser.role === 'System Admin';
+  // Chase Policy & Inactivity Modals State
+  const [showNudgeModal, setShowNudgeModal] = useState(false);
+  const [nudgeStage, setNudgeStage] = useState<1 | 2 | 3>(1);
+  const [customNudgeNote, setCustomNudgeNote] = useState('');
+  const [showAutoCloseModal, setShowAutoCloseModal] = useState(false);
+  const [autoCloseReason, setAutoCloseReason] = useState('');
+
+  const latestReturnHistory = useMemo(() => {
+    if (!changeRequest || !Array.isArray(changeRequest.approvalHistory)) return null;
+    return (
+      changeRequest.approvalHistory.find(
+        (h) =>
+          h &&
+          (h.toStatus === 'Returned to Requester' ||
+            h.decision === 'SendBack' ||
+            (typeof h.comments === 'string' && h.comments.includes('notes:')) ||
+            (typeof h.comments === 'string' && h.comments.toLowerCase().includes('clarification')))
+      ) || null
+    );
+  }, [changeRequest]);
+
+  const isItOrSystemAdmin =
+    hasRolePermission(currentUser.role, 'canDirectModifyCatalog', customRoles) ||
+    currentUser.role === 'IT Admin' ||
+    currentUser.role === 'System Admin';
 
   const handleCopyPhysicalPath = (path: string, id: string) => {
     navigator.clipboard.writeText(path);
@@ -90,12 +152,22 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   const risk = changeRequest.riskAssessment;
 
   const isItStaff =
+    hasRolePermission(currentUser.role, 'canViewItAdminWorkspace', customRoles) ||
+    hasRolePermission(currentUser.role, 'canViewDeveloperBoard', customRoles) ||
     currentUser.role === 'IT Admin' ||
     currentUser.role === 'Software Developer' ||
     currentUser.role === 'System Admin';
 
+  const canEditOrProvideClarification =
+    (changeRequest.status === 'Returned to Requester' || changeRequest.status === 'Draft') &&
+    (currentUser.id === changeRequest.requesterId ||
+      (currentUser.email && changeRequest.requesterEmail && currentUser.email.toLowerCase() === changeRequest.requesterEmail.toLowerCase()) ||
+      currentUser.role === 'Requester' ||
+      currentUser.role === 'System Admin') &&
+    Boolean(onEditRequest);
+
   const canRequestClarification =
-    isItStaff &&
+    (isItStaff || hasRolePermission(currentUser.role, 'canReturnToRequester', customRoles)) &&
     onSendBackToRequester &&
     changeRequest.status !== 'Draft' &&
     changeRequest.status !== 'Returned to Requester' &&
@@ -106,14 +178,18 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
     (currentUser.role === 'IT Admin' ||
       currentUser.role === 'System Admin' ||
       currentUser.role === 'Software Developer' ||
-      currentUser.role === 'Department HOD') &&
+      currentUser.role === 'Department HOD' ||
+      currentUser.role === 'Head of Department (HOD)' ||
+      hasRolePermission(currentUser.role, 'canApproveHodStage', customRoles) ||
+      hasRolePermission(currentUser.role, 'canTriageAndAssignDevs', customRoles)) &&
     Boolean(onRejectCase) &&
     changeRequest.status !== 'Draft' &&
     changeRequest.status !== 'Closed (Completed)' &&
     changeRequest.status !== 'Closed (Rejected)';
 
   const canReopen =
-    currentUser.role === 'System Admin' &&
+    (currentUser.role === 'System Admin' ||
+      hasRolePermission(currentUser.role, 'canReopenCases', customRoles)) &&
     Boolean(onReopenCase) &&
     changeRequest.status === 'Closed (Rejected)';
 
@@ -205,12 +281,28 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
         {/* Real-time SLA Status & Risk Indicator Banner */}
         <div className="bg-slate-50 border-b border-slate-200 px-6 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center space-x-2">
-            <Timer className="w-4 h-4 text-blue-600" />
-            <span className="font-semibold text-slate-700">Stage SLA ({slaInfo.stageName}):</span>
-            <span className={`px-2.5 py-0.5 rounded border text-[11px] ${getSlaBadgeClass(slaInfo.slaStatus)}`}>
-              {slaInfo.slaStatus === 'SLA Breached' ? 'SLA BREACHED' : slaInfo.slaStatus === 'Nearing Breach' ? 'NEARING BREACH' : 'ON TRACK'} 
-              {' '}({slaInfo.hoursElapsed}h elapsed / {slaInfo.targetHours}h SLA)
-            </span>
+            {slaInfo.isPaused ? (
+              <>
+                <PauseCircle className="w-4 h-4 text-amber-600 animate-pulse" />
+                <span className="font-semibold text-amber-950">Resolution SLA:</span>
+                <span className={`px-2.5 py-0.5 rounded border text-[11px] font-bold flex items-center gap-1 ${getSlaBadgeClass(slaInfo.slaStatus)}`}>
+                  <PauseCircle className="w-3 h-3 text-amber-700" />
+                  <span>SLA PAUSED (Waiting on Requester)</span>
+                </span>
+                <span className="text-slate-600 text-[11px]">
+                  ({slaInfo.daysWaitingOnRequester ?? 0}d {((slaInfo.hoursWaitingOnRequester ?? 0) % 24)}h paused • Net Active: {slaInfo.hoursElapsed}h / {slaInfo.targetHours}h)
+                </span>
+              </>
+            ) : (
+              <>
+                <Timer className="w-4 h-4 text-blue-600" />
+                <span className="font-semibold text-slate-700">Stage SLA ({slaInfo.stageName}):</span>
+                <span className={`px-2.5 py-0.5 rounded border text-[11px] font-bold ${getSlaBadgeClass(slaInfo.slaStatus)}`}>
+                  {slaInfo.slaStatus === 'SLA Breached' ? 'SLA BREACHED' : slaInfo.slaStatus === 'Nearing Breach' ? 'NEARING BREACH' : 'ON TRACK'} 
+                  {' '}({slaInfo.hoursElapsed}h elapsed / {slaInfo.targetHours}h SLA)
+                </span>
+              </>
+            )}
           </div>
 
           {risk && (
@@ -240,7 +332,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 </span>
                 {changeRequest.rejectedAt && (
                   <span className="text-[11px] text-rose-700 font-mono">
-                    Rejected Date: {changeRequest.rejectedAt}
+                    Rejected Date: {formatDisplayDateTime(changeRequest.rejectedAt)}
                   </span>
                 )}
               </div>
@@ -253,7 +345,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 <div className="bg-indigo-50/90 p-2.5 rounded-xl border border-indigo-200 text-indigo-950 text-xs flex items-center gap-2">
                   <RotateCcw className="w-4 h-4 text-indigo-600 shrink-0" />
                   <span>
-                    <strong>Previously Reopened by System Admin {changeRequest.reopenedByName}:</strong> "{changeRequest.reopenComments || 'Reopened and routed back.'}" ({changeRequest.reopenedAt})
+                    <strong>Previously Reopened by System Admin {changeRequest.reopenedByName}:</strong> "{changeRequest.reopenComments || 'Reopened and routed back.'}" ({formatDisplayDateTime(changeRequest.reopenedAt)})
                   </span>
                 </div>
               )}
@@ -273,6 +365,169 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                   </button>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Clarification Requested Banner if Returned to Requester */}
+        {changeRequest.status === 'Returned to Requester' && (
+          <div className="bg-amber-500/10 border-b-2 border-amber-300 px-6 py-4 flex items-start space-x-3 text-amber-950">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="space-y-3 flex-1 text-xs">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <span className="font-bold text-amber-950 text-sm flex items-center gap-2">
+                  <span>Action Required: Technical Details / Clarification Requested</span>
+                  {changeRequest.returnedByRole && (
+                    <span className="bg-amber-200/90 text-amber-900 px-2.5 py-0.5 rounded-full text-[10px] font-bold border border-amber-300">
+                      Requested by {latestReturnHistory?.actorName || 'Staff'} ({changeRequest.returnedByRole})
+                    </span>
+                  )}
+                </span>
+                {latestReturnHistory?.actionDate && (
+                  <span className="text-[11px] text-amber-800 font-mono">
+                    Returned: {formatDisplayDateTime(latestReturnHistory.actionDate)}
+                  </span>
+                )}
+              </div>
+
+              {latestReturnHistory?.comments && (
+                <div className="bg-white/95 p-3 rounded-xl border border-amber-200 text-amber-900 shadow-2xs">
+                  <strong className="text-amber-950 block mb-0.5">Questions / Requested Clarifications:</strong>
+                  <p className="leading-relaxed whitespace-pre-wrap font-medium">{latestReturnHistory.comments}</p>
+                </div>
+              )}
+
+              {/* 3-Stage Chase Policy & SLA Paused Metrics Card */}
+              <div className="bg-white/80 rounded-xl border border-amber-200/80 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center space-x-2">
+                    <PauseCircle className="w-4 h-4 text-amber-700" />
+                    <span className="font-bold text-amber-950 text-xs">
+                      SLA Clock is PAUSED — Waiting on Requester
+                    </span>
+                    <span className="text-[11px] text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-200 font-medium">
+                      Paused duration: {slaInfo.daysWaitingOnRequester ?? 0}d {((slaInfo.hoursWaitingOnRequester ?? 0) % 24)}h
+                    </span>
+                  </div>
+
+                  <div className="flex items-center space-x-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500">Chase Status:</span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${getChaseStageInfo(slaInfo.chaseStage).colorClass}`}>
+                      {getChaseStageInfo(slaInfo.chaseStage).shortBadge}
+                    </span>
+                  </div>
+                </div>
+
+                {/* 3-Strike Stage Progress Tracker */}
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    slaInfo.chaseStage === 1
+                      ? 'bg-amber-100/90 border-amber-400 font-bold text-amber-950 shadow-2xs'
+                      : slaInfo.chaseStage > 1
+                      ? 'bg-slate-100 border-slate-200 text-slate-600 line-through'
+                      : 'bg-white/60 border-slate-200 text-slate-500'
+                  }`}>
+                    <div className="text-[10px] uppercase tracking-wide font-bold">Stage 1 (Day 2+)</div>
+                    <div className="text-[11px]">Friendly Nudge</div>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    slaInfo.chaseStage === 2
+                      ? 'bg-orange-100/90 border-orange-400 font-bold text-orange-950 shadow-2xs'
+                      : slaInfo.chaseStage > 2
+                      ? 'bg-slate-100 border-slate-200 text-slate-600 line-through'
+                      : 'bg-white/60 border-slate-200 text-slate-500'
+                  }`}>
+                    <div className="text-[10px] uppercase tracking-wide font-bold">Stage 2 (Day 4+)</div>
+                    <div className="text-[11px]">Urgent (CC HOD)</div>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    slaInfo.chaseStage === 3
+                      ? 'bg-rose-100/90 border-rose-400 font-bold text-rose-950 shadow-2xs animate-pulse'
+                      : 'bg-white/60 border-slate-200 text-slate-500'
+                  }`}>
+                    <div className="text-[10px] uppercase tracking-wide font-bold">Stage 3 (Day 7+)</div>
+                    <div className="text-[11px]">Final Notice (48h)</div>
+                  </div>
+                </div>
+
+                {/* Reminder history summary */}
+                <div className="text-[11px] text-slate-600 flex items-center justify-between flex-wrap gap-1 pt-1">
+                  <span>
+                    Reminders sent: <strong>{changeRequest.reminderCount || 0}</strong>
+                    {changeRequest.lastReminderSentAt && (
+                      <span className="text-slate-500 ml-1">
+                        (Last sent: {formatDisplayDateTime(changeRequest.lastReminderSentAt)})
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-slate-500 text-[10px]">
+                    Policy: Auto-withdrawal on 7+ days inactivity (with 1-click reopen guarantee)
+                  </span>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-1 flex items-center justify-between flex-wrap gap-2">
+                {canEditOrProvideClarification ? (
+                  <div className="flex items-center justify-between w-full flex-wrap gap-2">
+                    <span className="text-[11px] text-amber-900 font-medium">
+                      Click below to respond, update technical specifications, or attach screenshots to resume the ticket.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        if (onEditRequest) {
+                          onEditRequest(changeRequest);
+                        }
+                      }}
+                      className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center space-x-1.5 cursor-pointer"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                      <span>Provide Clarification & Update Details</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between w-full flex-wrap gap-2">
+                    <span className="text-[11px] text-slate-600">
+                      Waiting for requester (<strong>{changeRequest.requesterName}</strong>) to respond.
+                    </span>
+
+                    <div className="flex items-center space-x-2">
+                      {isItStaff && onSendReminderNudge && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNudgeStage((slaInfo.chaseStage || 1) as 1 | 2 | 3);
+                            setCustomNudgeNote('');
+                            setShowNudgeModal(true);
+                          }}
+                          className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-colors shadow-xs flex items-center space-x-1.5 cursor-pointer"
+                        >
+                          <BellRing className="w-3.5 h-3.5" />
+                          <span>Dispatch Chase Nudge ({getChaseStageInfo(slaInfo.chaseStage).shortBadge})</span>
+                        </button>
+                      )}
+
+                      {(isItStaff || isItOrSystemAdmin) && onAutoCloseInactive && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAutoCloseReason(`Auto-withdrawn due to ${slaInfo.daysWaitingOnRequester ?? 7}+ days of inactivity with no requester response to clarification requests.`);
+                            setShowAutoCloseModal(true);
+                          }}
+                          className="px-3.5 py-1.5 bg-slate-700 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-colors shadow-xs flex items-center space-x-1.5 cursor-pointer"
+                        >
+                          <AlertOctagon className="w-3.5 h-3.5" />
+                          <span>Auto-Withdraw (Inactive)</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -311,9 +566,9 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
             <div>
               <span className="text-slate-500 block font-medium">Timeline</span>
               <div className="text-slate-800 font-semibold">
-                Created: {changeRequest.createdAt}
+                Created: {formatDisplayDateTime(changeRequest.createdAt)}
               </div>
-              <div className="text-slate-600">Target: {changeRequest.requestedCompletionDate}</div>
+              <div className="text-slate-600">Target: {formatDisplayDate(changeRequest.requestedCompletionDate)}</div>
             </div>
           </div>
 
@@ -333,7 +588,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                   </span>
                   {changeRequest.priorityChangedBy && (
                     <span className="text-[11px] text-amber-800 font-medium">
-                      By: <strong>{changeRequest.priorityChangedBy}</strong> {changeRequest.priorityChangedAt ? `(${changeRequest.priorityChangedAt})` : ''}
+                      By: <strong>{changeRequest.priorityChangedBy}</strong> {changeRequest.priorityChangedAt ? `(${formatDisplayDateTime(changeRequest.priorityChangedAt)})` : ''}
                     </span>
                   )}
                 </div>
@@ -384,7 +639,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           )}
 
           {/* Application Areas & Modules */}
-          {changeRequest.applicationAreas && changeRequest.applicationAreas.length > 0 ? (
+          {changeRequest.applicationAreas && Array.isArray(changeRequest.applicationAreas) && changeRequest.applicationAreas.length > 0 ? (
             <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-200">
               <span className="font-semibold text-slate-600 text-[11px] block">
                 Target Application Area (Module ➔ Sub-Function ➔ Process)
@@ -412,7 +667,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                 ))}
               </div>
             </div>
-          ) : changeRequest.affectedModules && changeRequest.affectedModules.length > 0 ? (
+          ) : changeRequest.affectedModules && Array.isArray(changeRequest.affectedModules) && changeRequest.affectedModules.length > 0 ? (
             <div className="space-y-1">
               <span className="font-semibold text-slate-500 text-[11px] block">
                 Affected Modules / Asset Tags
@@ -462,12 +717,12 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="flex items-center space-x-2 text-slate-900 font-bold text-xs">
                   <Code2 className="w-4 h-4 text-indigo-600" />
-                  <span>Developer Technical Implementation & Verification Details</span>
+                  <span>Technical Implementation</span>
                 </div>
                 {changeRequest.assignedDeveloperName && (
                   <span className="text-[11px] text-slate-500 font-medium">
                     Implemented by: <strong className="text-slate-800">{changeRequest.assignedDeveloperName}</strong>
-                    {changeRequest.actualCompletionDate ? ` (${changeRequest.actualCompletionDate})` : ''}
+                    {changeRequest.actualCompletionDate ? ` (${formatDisplayDate(changeRequest.actualCompletionDate)})` : ''}
                   </span>
                 )}
               </div>
@@ -570,19 +825,19 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
 
 
           {/* Attachments */}
-          {changeRequest.attachments.length > 0 && (
+          {(changeRequest.attachments || []).length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="font-bold text-xs uppercase tracking-wider text-slate-600 flex items-center space-x-1.5">
                   <Paperclip className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Attachment({changeRequest.attachments.length})</span>
+                  <span>Attachment({(changeRequest.attachments || []).length})</span>
                 </span>
                 
               </div>
 
               {/* End-user sanitized file cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {changeRequest.attachments.map((att) => (
+                {(changeRequest.attachments || []).map((att) => (
                   <div
                     key={att.id}
                     className="flex items-center justify-between p-2.5 bg-slate-50 hover:bg-white rounded-xl border border-slate-200/90 transition-all shadow-2xs"
@@ -644,7 +899,7 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
                         </span>
                       </div>
 
-                      {changeRequest.attachments.map((att) => {
+                      {(changeRequest.attachments || []).map((att) => {
                         const effectivePath =
                           att.storedPath ||
                           `\\\\tanaka-nas01.corp.internal\\PCS_Attachments\\prod_vault\\2026\\08\\${changeRequest.id}\\${att.fileName}`;
@@ -696,32 +951,38 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           <div className="space-y-3 pt-4 border-t border-slate-200">
             <h3 className="font-bold text-sm text-slate-900 flex items-center space-x-2">
               <History className="w-4 h-4 text-blue-600" />
-              <span>Immutable Approval Audit Trail ({changeRequest.approvalHistory.length} events)</span>
+              <span>Communication Trail ({(changeRequest.approvalHistory || []).length} events)</span>
             </h3>
 
-            <div className="relative pl-6 border-l-2 border-blue-500 space-y-4">
-              {changeRequest.approvalHistory.map((history) => (
-                <div key={history.id} className="relative space-y-1">
-                  <div className="absolute -left-[31px] top-1 w-3 h-3 rounded-full bg-blue-600 ring-4 ring-white" />
-                  <div className="flex items-center justify-between font-semibold text-slate-900">
-                    <span className="text-slate-800">
-                      {history.actorName} ({history.actorRole})
-                    </span>
-                    <span className="text-slate-400 font-normal">{history.actionDate}</span>
-                  </div>
-                  <div className="text-slate-600">
-                    Action: <strong className="text-slate-900">{history.decision}</strong> • From Status:{' '}
-                    <span className="text-slate-700">{history.fromStatus}</span> → To Status:{' '}
-                    <span className="text-blue-700 font-semibold">{history.toStatus}</span>
-                  </div>
-                  {history.comments && (
-                    <div className="bg-slate-50 p-2.5 rounded-lg border border-slate-200 italic text-slate-700 mt-1">
-                      "{history.comments}"
+            {(changeRequest.approvalHistory || []).length === 0 ? (
+              <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-xs text-slate-500 italic">
+                No previous approval decisions or stage transition records found for this ticket.
+              </div>
+            ) : (
+              <div className="relative pl-6 border-l-2 border-blue-500 space-y-4">
+                {(changeRequest.approvalHistory || []).map((history, idx) => (
+                  <div key={history.id || `hist-${idx}`} className="relative space-y-1.5 p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                    <div className="absolute -left-[31px] top-3.5 w-3 h-3 rounded-full bg-blue-600 ring-4 ring-white" />
+                    <div className="flex items-center justify-between font-semibold text-slate-900 flex-wrap gap-1">
+                      <span className="text-slate-800">
+                        {history.actorName || 'System'} ({history.actorRole || 'System Actor'})
+                      </span>
+                      <span className="text-slate-400 font-normal text-[11px]">{formatDisplayDateTime(history.actionDate)}</span>
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                    <div className="text-slate-600 text-xs">
+                      Action: <strong className="text-slate-900">{history.decision || 'Transition'}</strong> • From Status:{' '}
+                      <span className="text-slate-700">{history.fromStatus || 'N/A'}</span> → To Status:{' '}
+                      <span className="text-blue-700 font-semibold">{history.toStatus || 'N/A'}</span>
+                    </div>
+                    {history.comments && (
+                      <div className="bg-white p-2.5 rounded-lg border border-slate-200 italic text-slate-700 text-xs mt-1">
+                        "{history.comments}"
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -770,6 +1031,22 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           </div>
 
           <div className="flex items-center space-x-3">
+            {canEditOrProvideClarification && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  if (onEditRequest) {
+                    onEditRequest(changeRequest);
+                  }
+                }}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs transition-colors flex items-center space-x-1.5 shadow-sm cursor-pointer"
+              >
+                <Edit className="w-3.5 h-3.5" />
+                <span>{changeRequest.status === 'Draft' ? 'Edit Draft Request' : 'Provide Clarification & Update Details'}</span>
+              </button>
+            )}
+
             {canRequestClarification && (
               <button
                 type="button"
@@ -804,6 +1081,10 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
+          categories={categories}
+          services={services}
+          applications={applications}
+          issueTypes={issueTypes}
           onSave={handleSaveItModify}
         />
       )}
@@ -994,6 +1275,167 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>Return to Requester for Details</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🔔 Chase Policy Reminder Modal */}
+      {showNudgeModal && (
+        <div className="fixed inset-0 z-60 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full border border-slate-200 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center space-x-2 text-amber-950 font-bold text-sm">
+                <BellRing className="w-5 h-5 text-amber-600" />
+                <span>Dispatch Chase Reminder ({getChaseStageInfo(nudgeStage).shortBadge})</span>
+              </div>
+              <button
+                onClick={() => setShowNudgeModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-950 space-y-2">
+              <div className="font-semibold text-amber-950">CR: {changeRequest.id} — {changeRequest.title}</div>
+              <div className="text-[11px] text-amber-800">
+                Requester: <strong>{changeRequest.requesterName}</strong> ({changeRequest.requesterEmail})
+              </div>
+              <div className="text-[11px] text-amber-900/90 pt-1 border-t border-amber-200/80">
+                📬 <strong>Automated Delivery:</strong> This will dispatch an official SMTP notification email and a high-priority dashboard banner to the requester.
+                {nudgeStage >= 2 && ' Department HOD will be carbon-copied (CC) on this notice.'}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Select Chase Stage Policy Level
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {[1, 2, 3].map((stageNum) => {
+                  const stageInfo = getChaseStageInfo(stageNum);
+                  const isSelected = nudgeStage === stageNum;
+                  return (
+                    <button
+                      key={stageNum}
+                      type="button"
+                      onClick={() => setNudgeStage(stageNum as 1 | 2 | 3)}
+                      className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                        isSelected
+                          ? 'border-amber-500 bg-amber-50 text-amber-950 font-bold ring-2 ring-amber-300'
+                          : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      <div className="text-[10px] uppercase">{stageInfo.shortBadge}</div>
+                      <div className="text-[11px] font-semibold">{stageInfo.title}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Custom Reminder Note (Optional)
+              </label>
+              <textarea
+                rows={3}
+                value={customNudgeNote}
+                onChange={(e) => setCustomNudgeNote(e.target.value)}
+                placeholder="Add any specific context or friendly note for the requester..."
+                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-200"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => setShowNudgeModal(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onSendReminderNudge) {
+                    onSendReminderNudge(changeRequest.id, nudgeStage, customNudgeNote);
+                  }
+                  setShowNudgeModal(false);
+                }}
+                className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+              >
+                <BellRing className="w-3.5 h-3.5" />
+                <span>Send {getChaseStageInfo(nudgeStage).shortBadge}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🚨 Auto-Close / Withdraw Inactive Case Modal */}
+      {showAutoCloseModal && (
+        <div className="fixed inset-0 z-60 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full border border-slate-200 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center space-x-2 text-rose-950 font-bold text-sm">
+                <AlertOctagon className="w-5 h-5 text-rose-600" />
+                <span>Auto-Withdraw Inactive Case (3-Strike Rule)</span>
+              </div>
+              <button
+                onClick={() => setShowAutoCloseModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 text-xs text-rose-950 space-y-2">
+              <div className="font-semibold text-rose-950">CR: {changeRequest.id} — {changeRequest.title}</div>
+              <p className="text-[11px] text-rose-900 leading-relaxed">
+                This ticket has been waiting for requester response with no clarification provided. Under IT operations policy, inactive tickets may be auto-withdrawn to keep active backlogs clean.
+              </p>
+              <div className="text-[11px] text-rose-900 bg-white/70 p-2 rounded-lg border border-rose-100">
+                🛡️ <strong>1-Click Reopen Guarantee:</strong> If the requester returns at a later time, the ticket can be seamlessly reopened by System Admin or the Requester without losing prior progress.
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Auto-Withdrawal Audit Note <span className="text-rose-500">*</span>
+              </label>
+              <textarea
+                rows={3}
+                value={autoCloseReason}
+                onChange={(e) => setAutoCloseReason(e.target.value)}
+                placeholder="Reason for closing inactive case..."
+                className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-rose-200"
+              />
+            </div>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => setShowAutoCloseModal(false)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (onAutoCloseInactive && autoCloseReason.trim()) {
+                    onAutoCloseInactive(changeRequest.id, autoCloseReason.trim());
+                  }
+                  setShowAutoCloseModal(false);
+                }}
+                disabled={!autoCloseReason.trim()}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <AlertOctagon className="w-3.5 h-3.5" />
+                <span>Confirm Auto-Withdrawal</span>
               </button>
             </div>
           </div>

@@ -8,7 +8,44 @@
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
--- 1. DEPARTMENTS TABLE
+-- 1. SEQUENCES & AUTO-INCREMENT IDENTIFIERS
+-- ------------------------------------------------------------------------------
+CREATE SEQUENCE IF NOT EXISTS user_id_seq START 1 INCREMENT 1;
+
+-- Generates zero-padded, year-scoped User IDs (e.g., USR-2026-0001, USR-2026-8739)
+CREATE OR REPLACE FUNCTION generate_user_id()
+RETURNS VARCHAR(50) AS $$
+DECLARE
+    next_val BIGINT;
+    year_str VARCHAR(4);
+    formatted_id VARCHAR(50);
+BEGIN
+    next_val := nextval('user_id_seq');
+    year_str := TO_CHAR(CURRENT_DATE, 'YYYY');
+    formatted_id := 'USR-' || year_str || '-' || LPAD(next_val::TEXT, 4, '0');
+    RETURN formatted_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE SEQUENCE IF NOT EXISTS change_request_id_seq START 1 INCREMENT 1;
+
+-- Generates zero-padded, year-scoped Change Request IDs (e.g., ITO-CR-2026-00001, ITO-CR-2026-00002)
+CREATE OR REPLACE FUNCTION generate_change_request_id()
+RETURNS VARCHAR(50) AS $$
+DECLARE
+    next_val BIGINT;
+    year_str VARCHAR(4);
+    formatted_id VARCHAR(50);
+BEGIN
+    next_val := nextval('change_request_id_seq');
+    year_str := TO_CHAR(CURRENT_DATE, 'YYYY');
+    formatted_id := 'ITO-CR-' || year_str || '-' || LPAD(next_val::TEXT, 5, '0');
+    RETURN formatted_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ------------------------------------------------------------------------------
+-- 2. DEPARTMENTS TABLE
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS departments (
     id SERIAL PRIMARY KEY,
@@ -22,7 +59,7 @@ CREATE TABLE IF NOT EXISTS departments (
 );
 
 -- ------------------------------------------------------------------------------
--- 2. USERS TABLE (With Enterprise Password Policy & IT Approval Workflow)
+-- 3. USERS TABLE (With Enterprise Password Policy & IT Approval Workflow)
 -- ------------------------------------------------------------------------------
 -- Enterprise Password Policy Rules:
 -- 1. Length >= 10 characters
@@ -31,13 +68,13 @@ CREATE TABLE IF NOT EXISTS departments (
 -- 4. At least one special character [!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
-    id VARCHAR(50) PRIMARY KEY,
+    id VARCHAR(50) PRIMARY KEY DEFAULT generate_user_id(),
     full_name VARCHAR(150) NOT NULL,
     email VARCHAR(150) UNIQUE NOT NULL,
     username VARCHAR(100),
     password_hash VARCHAR(255) NOT NULL, -- Hashed password (e.g. bcrypt/Argon2)
     department_id INTEGER NOT NULL REFERENCES departments(id) ON UPDATE CASCADE,
-    role VARCHAR(50) NOT NULL CHECK (role IN ('Requester', 'Department HOD', 'IT Admin', 'Software Developer', 'System Admin')),
+    role VARCHAR(100) NOT NULL DEFAULT 'Requester',
     status VARCHAR(50) NOT NULL DEFAULT 'Pending IT Approval' CHECK (status IN ('Active', 'Pending IT Approval', 'Suspended')),
     must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     password_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -73,7 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_pwd_reset_otp ON password_reset_tokens(email, otp
 CREATE TABLE IF NOT EXISTS password_change_audit_logs (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(50) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    changed_by_user_id VARCHAR(50) REFERENCES users(id),
+    changed_by_user_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     change_type VARCHAR(50) NOT NULL CHECK (change_type IN ('Self-Reset', 'Self-Update', 'Admin-Urgent-Reset', 'Initial-Setup')),
     ip_address VARCHAR(50),
     user_agent TEXT,
@@ -86,7 +123,7 @@ CREATE TABLE IF NOT EXISTS password_change_audit_logs (
 -- 5. CHANGE REQUESTS TABLE (With IT Direct Classification & Priority Controls)
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS change_requests (
-    id VARCHAR(50) PRIMARY KEY,
+    id VARCHAR(50) PRIMARY KEY DEFAULT generate_change_request_id(),
     title VARCHAR(255) NOT NULL,
     request_type VARCHAR(50) NOT NULL CHECK (request_type IN ('Bug Fix', 'Enhancement', 'New Feature', 'Data Amendment', 'Incident', 'Service Request', 'Access Request', 'Information / How-To', 'Password / Account', 'Change Request')),
     priority VARCHAR(20) NOT NULL CHECK (priority IN ('Low', 'Medium', 'High', 'Critical')),
@@ -132,7 +169,10 @@ CREATE TABLE IF NOT EXISTS change_requests (
     category_changed_by VARCHAR(150),
     category_changed_at TIMESTAMP WITH TIME ZONE,
     -- Detailed Descriptions & Scope
-    affected_modules TEXT[] DEFAULT ARRAY[]::TEXT[],
+    affected_modules JSONB DEFAULT '[]'::jsonb,
+    attachments JSONB DEFAULT '[]'::jsonb,
+    application_areas JSONB DEFAULT '[]'::jsonb,
+    revision_history JSONB DEFAULT '[]'::jsonb,
     current_behavior_description TEXT,
     requested_change_description TEXT,
     business_justification TEXT,
@@ -147,7 +187,7 @@ CREATE TABLE IF NOT EXISTS change_requests (
     hod_review_notes TEXT,
     hod_reviewed_at TIMESTAMP WITH TIME ZONE,
     -- IT Assignment & Execution
-    it_assigned_developer_id VARCHAR(50) REFERENCES users(id),
+    it_assigned_developer_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     it_assigned_developer_name VARCHAR(150),
     reassigned_by VARCHAR(150),
     reassigned_at TIMESTAMP WITH TIME ZONE,
@@ -164,15 +204,25 @@ CREATE TABLE IF NOT EXISTS change_requests (
     risk_score INTEGER DEFAULT 25,
     actual_completion_date DATE,                   -- Date when technical implementation was completed
     -- Rejection & Reopen Workflow Tracking (IT Admin, System Admin, IT Staff, Developer, HOD)
-    rejected_by_user_id VARCHAR(50) REFERENCES users(id),
+    rejected_by_user_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     rejected_by_name VARCHAR(150),
     rejected_by_role VARCHAR(50),
     rejected_at TIMESTAMP WITH TIME ZONE,
     rejection_reason TEXT,
-    reopened_by_user_id VARCHAR(50) REFERENCES users(id),
+    reopened_by_user_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     reopened_by_name VARCHAR(150),
     reopened_at TIMESTAMP WITH TIME ZONE,
     reopen_comments TEXT,
+    -- Waiting on Requester SLA Clock Pause & 3-Stage Chase Policy (Strike 1, 2, 3) & Auto-Closure
+    sla_paused_at TIMESTAMP WITH TIME ZONE,
+    total_sla_paused_hours INTEGER DEFAULT 0,
+    reminder_count INTEGER DEFAULT 0,
+    last_reminder_sent_at TIMESTAMP WITH TIME ZONE,
+    last_reminder_stage INTEGER,
+    auto_closure_warned_at TIMESTAMP WITH TIME ZONE,
+    is_auto_closed_inactive BOOLEAN DEFAULT FALSE,
+    withdrawn_at TIMESTAMP WITH TIME ZONE,
+    withdrawn_reason TEXT,
     -- Workload Scoring (Critical=4, High=3, Medium=2, Low=1)
     workload_points INTEGER GENERATED ALWAYS AS (
         CASE priority
@@ -193,13 +243,67 @@ CREATE INDEX IF NOT EXISTS idx_cr_requester ON change_requests(requester_id);
 CREATE INDEX IF NOT EXISTS idx_cr_dept ON change_requests(department_id);
 CREATE INDEX IF NOT EXISTS idx_cr_dev ON change_requests(it_assigned_developer_id);
 
+-- Ensure JSONB columns exist and are converted from legacy ARRAY if present
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'change_requests' AND column_name = 'affected_modules' AND data_type = 'ARRAY'
+    ) THEN
+        ALTER TABLE change_requests ALTER COLUMN affected_modules DROP DEFAULT;
+        ALTER TABLE change_requests ALTER COLUMN affected_modules TYPE JSONB USING to_jsonb(affected_modules);
+        ALTER TABLE change_requests ALTER COLUMN affected_modules SET DEFAULT '[]'::jsonb;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'change_requests' AND column_name = 'attachments' AND data_type = 'ARRAY'
+    ) THEN
+        ALTER TABLE change_requests ALTER COLUMN attachments DROP DEFAULT;
+        ALTER TABLE change_requests ALTER COLUMN attachments TYPE JSONB USING to_jsonb(attachments);
+        ALTER TABLE change_requests ALTER COLUMN attachments SET DEFAULT '[]'::jsonb;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'change_requests' AND column_name = 'application_areas' AND data_type = 'ARRAY'
+    ) THEN
+        ALTER TABLE change_requests ALTER COLUMN application_areas DROP DEFAULT;
+        ALTER TABLE change_requests ALTER COLUMN application_areas TYPE JSONB USING to_jsonb(application_areas);
+        ALTER TABLE change_requests ALTER COLUMN application_areas SET DEFAULT '[]'::jsonb;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'change_requests' AND column_name = 'revision_history' AND data_type = 'ARRAY'
+    ) THEN
+        ALTER TABLE change_requests ALTER COLUMN revision_history DROP DEFAULT;
+        ALTER TABLE change_requests ALTER COLUMN revision_history TYPE JSONB USING to_jsonb(revision_history);
+        ALTER TABLE change_requests ALTER COLUMN revision_history SET DEFAULT '[]'::jsonb;
+    END IF;
+END $$;
+
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS affected_modules JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS application_areas JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS revision_history JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS sla_paused_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS total_sla_paused_hours INTEGER DEFAULT 0;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS reminder_count INTEGER DEFAULT 0;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS last_reminder_sent_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS last_reminder_stage INTEGER;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS auto_closure_warned_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS is_auto_closed_inactive BOOLEAN DEFAULT FALSE;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS withdrawn_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE change_requests ADD COLUMN IF NOT EXISTS withdrawn_reason TEXT;
+
 -- ------------------------------------------------------------------------------
 -- 6. CHANGE REQUEST APPROVAL & STATUS AUDIT HISTORY TABLE
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS change_request_approval_history (
     id SERIAL PRIMARY KEY,
     change_request_id VARCHAR(50) NOT NULL REFERENCES change_requests(id) ON DELETE CASCADE,
-    actor_user_id VARCHAR(50) NOT NULL REFERENCES users(id),
+    actor_user_id VARCHAR(50) REFERENCES users(id) ON DELETE SET NULL,
     actor_name VARCHAR(150) NOT NULL,
     actor_role VARCHAR(50) NOT NULL,
     action_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -217,7 +321,7 @@ CREATE OR REPLACE VIEW approval_history AS
 SELECT * FROM change_request_approval_history;
 
 -- ------------------------------------------------------------------------------
--- 7. EMAIL NOTIFICATION OUTBOX LOGS TABLE
+-- 7. EMAIL NOTIFICATION OUTBOX LOGS & EMAIL TEMPLATES TABLES
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS email_notification_logs (
     id VARCHAR(100) PRIMARY KEY,
@@ -238,6 +342,66 @@ CREATE INDEX IF NOT EXISTS idx_email_logs_crid ON email_notification_logs(change
 -- Backward compatibility view alias
 CREATE OR REPLACE VIEW email_notifications AS
 SELECT * FROM email_notification_logs;
+
+CREATE TABLE IF NOT EXISTS email_templates (
+    id VARCHAR(100) PRIMARY KEY,
+    category VARCHAR(50) NOT NULL,
+    event_name VARCHAR(150) NOT NULL,
+    description TEXT,
+    subject_template VARCHAR(255) NOT NULL,
+    recipient_description VARCHAR(255),
+    variables JSONB DEFAULT '[]'::jsonb,
+    body_html TEXT NOT NULL,
+    enabled BOOLEAN DEFAULT TRUE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_by VARCHAR(150)
+);
+
+INSERT INTO email_templates (id, category, event_name, description, subject_template, recipient_description, variables, body_html, enabled, updated_by)
+VALUES
+(
+    'tpl-cr-created-hod',
+    'CR Workflow',
+    'CR Created (Pending HOD Approval)',
+    'Dispatched to the Department HOD when an employee submits a new Change Request.',
+    '[ACTION REQUIRED] New Change Request {{crId}}: {{title}} (Pending HOD Approval)',
+    'Department HOD',
+    '["{{crId}}", "{{title}}", "{{requesterName}}", "{{departmentName}}", "{{priority}}", "{{createdDate}}"]'::jsonb,
+    '<p>Dear <strong>{{hodName}}</strong>,</p><p>A new Change Request has been submitted by <strong>{{requesterName}}</strong> from <strong>{{departmentName}}</strong>.</p><ul><li><strong>Ticket ID:</strong> {{crId}}</li><li><strong>Title:</strong> {{title}}</li><li><strong>Priority:</strong> {{priority}}</li><li><strong>Submission Date:</strong> {{createdDate}}</li></ul><p>Please log in to Tanaka Precision CRMS to review, endorse, or return this request.</p>',
+    TRUE,
+    'System Administrator'
+),
+(
+    'tpl-hod-approved-it',
+    'CR Workflow',
+    'HOD Approved (Routing to IT Admin)',
+    'Dispatched to IT Operations when the Department HOD endorses a Change Request.',
+    '[IT OPS] {{crId}}: Endorsed by HOD {{hodName}} - Ready for IT Triage',
+    'IT Administrators',
+    '["{{crId}}", "{{title}}", "{{requesterName}}", "{{departmentName}}", "{{hodName}}", "{{priority}}"]'::jsonb,
+    '<p>Dear IT Operations,</p><p>Change Request <strong>{{crId}}</strong> has been approved and endorsed by <strong>{{hodName}}</strong> ({{departmentName}}).</p><ul><li><strong>CR Title:</strong> {{title}}</li><li><strong>Requester:</strong> {{requesterName}}</li><li><strong>Priority:</strong> {{priority}}</li></ul><p>Please assign an IT Software Developer to initiate technical implementation.</p>',
+    TRUE,
+    'System Administrator'
+),
+(
+    'tpl-pwd-reset-otp',
+    'Security & Auth',
+    'Password Reset OTP Verification',
+    'Dispatched to user when requesting self-service password reset.',
+    '[IT OPS SECURITY] Your 6-Digit Password Reset OTP: {{otpCode}}',
+    'Requesting User',
+    '["{{fullName}}", "{{otpCode}}", "{{expiresMinutes}}", "{{requestedTime}}"]'::jsonb,
+    '<p>Dear <strong>{{fullName}}</strong>,</p><p>You have requested a secure password reset for your Tanaka Precision PCS account.</p><div style="padding:16px;background:#f1f5f9;font-size:24px;font-weight:bold;letter-spacing:4px;color:#0f172a;text-align:center;">{{otpCode}}</div><p>This code will expire in {{expiresMinutes}} minutes. Do not share this OTP with anyone.</p>',
+    TRUE,
+    'System Administrator'
+)
+ON CONFLICT (id) DO UPDATE SET
+    event_name = EXCLUDED.event_name,
+    description = EXCLUDED.description,
+    subject_template = EXCLUDED.subject_template,
+    body_html = EXCLUDED.body_html,
+    variables = EXCLUDED.variables,
+    updated_at = CURRENT_TIMESTAMP;
 
 -- ------------------------------------------------------------------------------
 -- 8. STORED FUNCTION: VERIFY ENTERPRISE PASSWORD POLICY COMPLIANCE
@@ -273,32 +437,52 @@ $$ LANGUAGE plpgsql;
 -- 8. INITIAL SEED DATA (Departments & Users with Compliant Credentials)
 -- ------------------------------------------------------------------------------
 INSERT INTO departments (id, code, name, hod_user_id, hod_name, hod_email) VALUES
-(1, 'MFG', 'Manufacturing & Assembly', 'user-002', 'Tan Ah Hock', 'tan.ah.hock@tanaka.com.my'),
-(2, 'QC', 'Quality Control & Assurance', 'user-005', 'Lee Mei Ling', 'lee.meiling@tanaka.com.my'),
-(3, 'IT', 'Information Technology', 'user-003', 'David Ng', 'david.it@company.com'),
-(4, 'FIN', 'Finance & Accounting', 'user-006', 'Siti Fatimah', 'siti.fatimah@tanaka.com.my'),
-(5, 'SCM', 'Supply Chain & Warehouse', 'user-007', 'M. Shanmugam', 'shanmugam@tanaka.com.my'),
-(6, 'ENG', 'Engineering & Tooling', 'user-008', 'Chong Wei Lun', 'chong.wl@tanaka.com.my')
+(1, 'GM', 'General Manager', 'user-hod-gm', 'Mr. Fukui', 'fukui@ml.tanaka.co.jp'),
+(2, 'HR', 'Human Resources', 'user-hod-hr', 'Chong Jun Leong (Mr. Chong)', 'chong@tanaka.com.my'),
+(3, 'MKT', 'TKK Marketing', 'user-hod-mkt', 'CS Tan (Mr. CS Tan)', 'cstan@ml.tanaka.co.jp'),
+(4, 'EQ', 'Engineering & Quality', 'user-hod-eq', 'Tye Ching Foa (Mr. CF Tye)', 'CFTYE@tanaka.com.my'),
+(5, 'SEC', 'Security', 'user-hod-sec', 'Yusriman Ismail (Mr. Yusriman)', 'YUS@tanaka.com.my'),
+(6, 'PE', 'Production Engineering', 'user-hod-pe', 'Hafidhzul (Mr. Hafidhzul)', 'HAFIDHZUL@tanaka.com.my'),
+(7, 'PROD', 'Production', 'user-hod-prod', 'Loh Pui Ling (Ms. Astrid)', 'ASTRID@tanaka.com.my'),
+(8, 'IT', 'IT', 'user-hod-it', 'Nakamura Takahiro (Mr. Nakamura)', 'nakamu@ml.tanaka.co.jp'),
+(9, 'EHS', 'Facility & Safety', 'user-hod-ehs', 'Mohd Azley Mohd Sharif (Mr. Azley)', 'AZLEY@tanaka.com.my'),
+(10, 'BWM', 'BWM', 'user-hod-bwm', 'Ch''ng Chin Chee (Mr. Gabriel)', 'GABRIEL@tanaka.com.my'),
+(11, 'ADM', 'Administration', 'user-hod-adm', 'Khoo Lay Ean (Ms. LE Khoo)', 'LEKHOO@tanaka.com.my')
 ON CONFLICT (id) DO UPDATE SET
+    code = EXCLUDED.code,
     name = EXCLUDED.name,
+    hod_user_id = EXCLUDED.hod_user_id,
     hod_name = EXCLUDED.hod_name,
-    hod_email = EXCLUDED.hod_email;
+    hod_email = EXCLUDED.hod_email,
+    updated_at = CURRENT_TIMESTAMP;
 
--- Seed Active Core Users (Compliant Passwords: e.g. Pass@1234, Admin@2026)
-INSERT INTO users (id, full_name, email, password_hash, department_id, role, status) VALUES
-('user-001', 'Alice Morgan', 'alice.m@company.com', '$2a$12$e8yv.compliantPass@1234', 1, 'Requester', 'Active'),
-('user-002', 'Tan Ah Hock', 'tan.ah.hock@tanaka.com.my', '$2a$12$e8yv.compliantPass@1234', 1, 'Department HOD', 'Active'),
-('user-003', 'David Ng', 'david.it@company.com', '$2a$12$e8yv.compliantAdmin@2026', 3, 'IT Admin', 'Active'),
-('user-004', 'Sarah Chen', 'sarah.dev@company.com', '$2a$12$e8yv.compliantPass@1234', 3, 'Software Developer', 'Active'),
-('user-005', 'Lee Mei Ling', 'lee.meiling@tanaka.com.my', '$2a$12$e8yv.compliantPass@1234', 2, 'Department HOD', 'Active'),
-('user-006', 'Siti Fatimah', 'siti.fatimah@tanaka.com.my', '$2a$12$e8yv.compliantPass@1234', 4, 'Department HOD', 'Active'),
-('user-007', 'M. Shanmugam', 'shanmugam@tanaka.com.my', '$2a$12$e8yv.compliantPass@1234', 5, 'Department HOD', 'Active'),
-('user-008', 'Chong Wei Lun', 'chong.wl@tanaka.com.my', '$2a$12$e8yv.compliantPass@1234', 6, 'Department HOD', 'Active'),
-('user-009', 'Ahmad Faris', 'ahmad.f@company.com', '$2a$12$e8yv.compliantPass@1234', 2, 'Requester', 'Active')
+-- Seed Active Core Users (Compliant Passwords: e.g. Pass@1234, Admin@2026, P@ssw0rd2026!)
+INSERT INTO users (id, full_name, email, username, password_hash, department_id, role, status, must_change_password) VALUES
+('user-admin-it', 'David Ng', 'david.it@company.com', 'david.it', 'P@ssw0rd2026!', 8, 'IT Admin', 'Active', FALSE),
+('user-sys-admin', 'System Administrator', 'admin@tanaka.com.my', 'admin', 'Admin@2026', 8, 'System Admin', 'Active', FALSE),
+('user-dev-1', 'Alex Chen', 'alex.chen@company.com', 'alex.chen', 'Pass@1234', 8, 'Software Developer', 'Active', FALSE),
+('user-dev-2', 'Elena Rostova', 'elena.r@company.com', 'elena.rostova', 'Pass@1234', 8, 'Software Developer', 'Active', FALSE),
+('user-hod-gm', 'Mr. Fukui', 'fukui@ml.tanaka.co.jp', 'fukui', 'P@ssw0rd2026!', 1, 'Department HOD', 'Active', FALSE),
+('user-hod-hr', 'Chong Jun Leong (Mr. Chong)', 'chong@tanaka.com.my', 'chong.jl', 'P@ssw0rd2026!', 2, 'Department HOD', 'Active', FALSE),
+('user-hod-mkt', 'CS Tan (Mr. CS Tan)', 'cstan@ml.tanaka.co.jp', 'cstan', 'P@ssw0rd2026!', 3, 'Department HOD', 'Active', FALSE),
+('user-hod-eq', 'Tye Ching Foa (Mr. CF Tye)', 'CFTYE@tanaka.com.my', 'cftye', 'P@ssw0rd2026!', 4, 'Department HOD', 'Active', FALSE),
+('user-hod-sec', 'Yusriman Ismail (Mr. Yusriman)', 'YUS@tanaka.com.my', 'yusriman', 'P@ssw0rd2026!', 5, 'Department HOD', 'Active', FALSE),
+('user-hod-pe', 'Hafidhzul (Mr. Hafidhzul)', 'HAFIDHZUL@tanaka.com.my', 'hafidhzul', 'P@ssw0rd2026!', 6, 'Department HOD', 'Active', FALSE),
+('user-hod-prod', 'Loh Pui Ling (Ms. Astrid)', 'ASTRID@tanaka.com.my', 'astrid.loh', 'P@ssw0rd2026!', 7, 'Department HOD', 'Active', FALSE),
+('user-hod-it', 'Nakamura Takahiro (Mr. Nakamura)', 'nakamu@ml.tanaka.co.jp', 'nakamura', 'P@ssw0rd2026!', 8, 'Department HOD', 'Active', FALSE),
+('user-hod-ehs', 'Mohd Azley Mohd Sharif (Mr. Azley)', 'AZLEY@tanaka.com.my', 'azley', 'P@ssw0rd2026!', 9, 'Department HOD', 'Active', FALSE),
+('user-hod-bwm', 'Ch''ng Chin Chee (Mr. Gabriel)', 'GABRIEL@tanaka.com.my', 'gabriel.chng', 'P@ssw0rd2026!', 10, 'Department HOD', 'Active', FALSE),
+('user-hod-adm', 'Khoo Lay Ean (Ms. LE Khoo)', 'LEKHOO@tanaka.com.my', 'lekhoo', 'P@ssw0rd2026!', 11, 'Department HOD', 'Active', FALSE),
+('user-req-01', 'Alice Morgan', 'alice.m@company.com', 'alice.m', 'Pass@1234', 1, 'Requester', 'Active', FALSE),
+('user-req-02', 'Ahmad Faris', 'ahmad.f@company.com', 'ahmad.f', 'Pass@1234', 2, 'Requester', 'Active', FALSE)
 ON CONFLICT (id) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
     email = EXCLUDED.email,
+    username = EXCLUDED.username,
+    department_id = EXCLUDED.department_id,
     role = EXCLUDED.role,
-    status = EXCLUDED.status;
+    status = EXCLUDED.status,
+    must_change_password = EXCLUDED.must_change_password;
 
 -- ------------------------------------------------------------------------------
 -- 9. ENTERPRISE STORAGE VAULT CONFIGURATION TABLE (IT & Admin Managed)
@@ -530,8 +714,9 @@ ON CONFLICT (id) DO UPDATE SET
 INSERT INTO application_assets (id, service_id, code, name, asset_tag, description, has_application_area, is_active, display_order)
 VALUES
     ('app-soms-core', 'srv-biz-soms', 'SOMS_CORE', 'SOMS Core Engine', 'APP-SOMS-01', 'Primary Sales Order Management System Application Suite', TRUE, TRUE, 1),
-    ('app-erp-finance', 'srv-biz-erp', 'ERP_FIN', 'ERP Financials', 'APP-ERP-01', 'General Ledger & Accounts Module', TRUE, TRUE, 1),
-    ('app-hr-portal', 'srv-biz-hr', 'HR_PORTAL', 'HR Employee Portal', 'APP-HR-01', 'Staff Self-Service & Leave Management', TRUE, TRUE, 1)
+    ('app-erp-finance', 'srv-biz-erp', 'ERP_FIN', 'ERP Financials', 'APP-ERP-01', 'General Ledger & Accounts Module', TRUE, TRUE, 2),
+    ('app-hr-portal', 'srv-biz-hr', 'HR_PORTAL', 'HR Employee Portal', 'APP-HR-01', 'Staff Self-Service & Leave Management', TRUE, TRUE, 3),
+    ('app-pcs-net', 'srv-biz-soms', 'PCS_NET', 'PCS.NET Production System', 'APP-PCS-01', 'Tanaka Production Control Main Core System & Subsystems', TRUE, TRUE, 4)
 ON CONFLICT (id) DO UPDATE SET
     service_id = EXCLUDED.service_id,
     name = EXCLUDED.name,
@@ -560,6 +745,89 @@ ON CONFLICT (id) DO UPDATE SET
     description = EXCLUDED.description,
     badge_color = EXCLUDED.badge_color,
     default_priority = EXCLUDED.default_priority,
+    is_active = EXCLUDED.is_active,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- ------------------------------------------------------------------------------
+-- 14.1 SEED 3-TIER APPLICATION HIERARCHY (MODULES, SUB-FUNCTIONS, PROCESSES)
+-- ------------------------------------------------------------------------------
+INSERT INTO application_modules (id, application_id, code, name, description, display_order, is_active)
+VALUES
+    ('mod-pcs-107', 'app-pcs-net', '107_PCS.NET', '107_PCS.NET', 'Production Control Main Core System', 1, TRUE),
+    ('mod-pcs-101', 'app-pcs-net', '101_APMS.NET', '101_APMS.NET', 'Accounts Payable Management System', 2, TRUE),
+    ('mod-pcs-102', 'app-pcs-net', '102_DIES.NET', '102_DIES.NET', 'Dies & Tooling Control Module', 3, TRUE),
+    ('mod-pcs-103', 'app-pcs-net', '103_ECN.NET', '103_ECN.NET', 'Engineering Change Notice System', 4, TRUE),
+    ('mod-pcs-104', 'app-pcs-net', '104_E-INVOICE.NET', '104_E-INVOICE.NET', 'Electronic Tax Invoicing Engine', 5, TRUE),
+    ('mod-pcs-105', 'app-pcs-net', '105_FA.NET', '105_FA.NET', 'Fixed Assets Accounting Module', 6, TRUE),
+    ('mod-pcs-106', 'app-pcs-net', '106_MCS.NET', '106_MCS.NET', 'Material Control & Inventory System', 7, TRUE),
+    ('mod-pcs-108', 'app-pcs-net', '108_POWERBI.NET', '108_POWERBI.NET', 'PowerBI Analytics & Reporting Portal', 8, TRUE),
+    ('mod-pcs-109', 'app-pcs-net', '109_PROGRAMMASTER.NET', '109_PROGRAMMASTER.NET', 'Program Master Configurator', 9, TRUE),
+    ('mod-pcs-110', 'app-pcs-net', '110_PRONET.NET', '110_PRONET.NET', 'Production Network Dispatch Engine', 10, TRUE),
+    ('mod-pcs-111', 'app-pcs-net', '111_RESERVATION.NET', '111_RESERVATION.NET', 'Inventory Reservation System', 11, TRUE),
+    ('mod-pcs-112', 'app-pcs-net', '112_SHIPPING.NET', '112_SHIPPING.NET', 'Shipping & Logistics Program', 12, TRUE),
+    ('mod-pcs-113', 'app-pcs-net', '113_SOMS.NET', '113_SOMS.NET', 'Sales Order Management System', 13, TRUE),
+    ('mod-pcs-114', 'app-pcs-net', '114_VMS.NET', '114_VMS.NET', 'Vendor Management System', 14, TRUE),
+    ('mod-pcs-115', 'app-pcs-net', '115_MPC.NET', '115_MPC.NET', 'Material Production Control', 15, TRUE),
+    ('mod-pcs-116', 'app-pcs-net', '116_CERTIFICATE.NET', '116_CERTIFICATE.NET', 'Certificate Management System', 16, TRUE),
+    ('mod-pcs-118', 'app-pcs-net', '118_ASSETEXIT(VB6)', '118_ASSETEXIT(VB6)', 'Asset Exit Legacy Subsystem', 17, TRUE),
+    ('mod-pcs-119', 'app-pcs-net', '119_SPL1', '119_SPL1_Prod Support Issue Trace Label', 'Spool Trace Label Issue Program', 18, TRUE),
+    ('mod-pcs-120', 'app-pcs-net', '120_SPL2', '120_SPL2_PS Issue Request Spool For Wcard', 'Spool Request For Wildcard Program', 19, TRUE),
+    ('mod-pcs-121', 'app-pcs-net', '121_SPL3', '121_SPL3_Spool Receiving Program', 'Spool Receiving Management Program', 20, TRUE),
+    ('mod-pcs-122', 'app-pcs-net', '122_SPL4', '122_SPL4_Spool Shipping Program', 'Spool Shipping Program', 21, TRUE),
+    ('mod-pcs-123', 'app-pcs-net', '123_SPL5', '123_SPL5_Spool Transfer Program', 'Spool Transfer Program', 22, TRUE),
+    ('mod-pcs-124', 'app-pcs-net', '124_SPL6', '124_SPL6_Empty Spool Return Program', 'Empty Spool Return Program', 23, TRUE)
+ON CONFLICT (id) DO UPDATE SET
+    application_id = EXCLUDED.application_id,
+    code = EXCLUDED.code,
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    display_order = EXCLUDED.display_order,
+    is_active = EXCLUDED.is_active,
+    updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO application_subfunctions (id, module_id, code, name, description, display_order, is_active)
+VALUES
+    ('sf-pcs-cd2', 'mod-pcs-107', 'CD2_WIRE', 'CD2 Wire Operations', 'CD2 wire line fabrication and process tracking', 1, TRUE),
+    ('sf-pcs-spool', 'mod-pcs-107', 'SPOOL_MGMT', 'Spool Management', 'Spool tracking, labeling, receiving and returns', 2, TRUE),
+    ('sf-apms-ap', 'mod-pcs-101', 'AP_OPERATIONS', 'Accounts Payable', 'Invoicing, vouchers, and reconciliations', 1, TRUE),
+    ('sf-einv-tax', 'mod-pcs-104', 'TAX_VALIDATION', 'Tax Validation', 'E-Invoicing validation and digital signature', 1, TRUE)
+ON CONFLICT (id) DO UPDATE SET
+    module_id = EXCLUDED.module_id,
+    code = EXCLUDED.code,
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    display_order = EXCLUDED.display_order,
+    is_active = EXCLUDED.is_active,
+    updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO application_processes (id, subfunction_id, code, name, description, display_order, is_active)
+VALUES
+    ('proc-cd2-1', 'sf-pcs-cd2', 'WIRE_RCV', 'Wire Receive From MCS', 'Receipt of wire rod from material control', 1, TRUE),
+    ('proc-cd2-2', 'sf-pcs-cd2', 'CASE_ID', 'CD2 Issue Case ID', 'Case identification tagging', 2, TRUE),
+    ('proc-cd2-3', 'sf-pcs-cd2', 'COMM_UPD', 'CD2 Comm Update', 'Communication and equipment status update', 3, TRUE),
+    ('proc-cd2-4', 'sf-pcs-cd2', 'REG_SCRAP', 'Register CD2 Scrap', 'Scrap registration and defect accounting', 4, TRUE),
+    ('proc-cd2-5', 'sf-pcs-cd2', 'WK_CLOSE', 'CD2 WorkCard Close', 'Closing work order cards', 5, TRUE),
+    ('proc-cd2-6', 'sf-pcs-cd2', 'DIA_VAL', 'CD2 Diameter Value', 'Gauge and diameter sensor reading', 6, TRUE),
+    ('proc-cd2-7', 'sf-pcs-cd2', 'TRF_MCS', 'CD2 Transfer to MCS', 'Product transfer back to material control', 7, TRUE),
+    ('proc-cd2-8', 'sf-pcs-cd2', 'TRF_MCS_ND', 'CD2 Transfer to MCS NEW DESIGN', 'New design transfer protocol to MCS', 8, TRUE),
+    ('proc-spl-1', 'sf-pcs-spool', 'SPL_TRACE', 'Spool Trace Label Issue', 'Traceability label generation', 1, TRUE),
+    ('proc-spl-2', 'sf-pcs-spool', 'SPL_REQ_WC', 'Spool Request For WildCard', 'Wildcard spool issue requisition', 2, TRUE),
+    ('proc-spl-3', 'sf-pcs-spool', 'SPL_RCV', 'Spool Receiving Program', 'Spool receiving intake verification', 3, TRUE),
+    ('proc-spl-4', 'sf-pcs-spool', 'SPL_SHIP', 'Spool Shipping Program', 'Finished spool dispatch', 4, TRUE),
+    ('proc-spl-5', 'sf-pcs-spool', 'SPL_TRF', 'Spool Transfer Program', 'Inter-department spool relocation', 5, TRUE),
+    ('proc-spl-6', 'sf-pcs-spool', 'SPL_RET', 'Empty Spool Return', 'Return processing for empty spools', 6, TRUE),
+    ('proc-ap-1', 'sf-apms-ap', 'AP_TAX_VERIFY', 'AP Tax Invoice Verification', 'Tax invoice 3-way matching', 1, TRUE),
+    ('proc-ap-2', 'sf-apms-ap', 'AP_BATCH_POST', 'Batch Voucher Posting', 'Batch GL journal posting', 2, TRUE),
+    ('proc-ap-3', 'sf-apms-ap', 'AP_VEND_RECON', 'Vendor Payment Reconciliation', 'Statement reconciliation', 3, TRUE),
+    ('proc-einv-1', 'sf-einv-tax', 'EINV_VIES', 'EU VIES VAT Auto-Validation', 'Automated VAT portal check', 1, TRUE),
+    ('proc-einv-2', 'sf-einv-tax', 'EINV_REV_CHG', 'Reverse Charge Invoice Generator', 'Tax compliance generator', 2, TRUE),
+    ('proc-einv-3', 'sf-einv-tax', 'EINV_SIG', 'E-Invoice Digital Signature', 'Cryptographic signing of invoice', 3, TRUE)
+ON CONFLICT (id) DO UPDATE SET
+    subfunction_id = EXCLUDED.subfunction_id,
+    code = EXCLUDED.code,
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    display_order = EXCLUDED.display_order,
     is_active = EXCLUDED.is_active,
     updated_at = CURRENT_TIMESTAMP;
 
@@ -1306,7 +1574,7 @@ BEGIN
         'em-del-rev-' || EXTRACT(EPOCH FROM v_now)::BIGINT,
         v_delegation.delegate_email,
         v_delegation.delegate_name,
-        '[PCS NOTIFICATION] Temporary Approver Authority Revoked - ' || v_delegation.department_name,
+        '[IT OPS] Temporary Approver Authority Revoked - ' || v_delegation.department_name,
         '<p>Dear ' || v_delegation.delegate_name || ',</p>' ||
         '<p>This is an automated notification that your Acting Approver authority for <strong>' || v_delegation.department_name || '</strong> has been <strong>revoked</strong> by Head of Department <strong>' || p_revoked_by_name || '</strong> with immediate effect.</p>' ||
         '<ul>' ||
@@ -1465,7 +1733,7 @@ BEGIN
         p_change_request_id,
         v_cr.requester_email,
         v_cr.requester_name,
-        '[PCS NOTIFICATION] Change Request ' || p_change_request_id || ' Rejected by ' || p_actor_name || ' (' || p_actor_role || ')',
+        '[IT OPS] Change Request ' || p_change_request_id || ' Rejected by ' || p_actor_name || ' (' || p_actor_role || ')',
         '<p>Dear ' || v_cr.requester_name || ',</p>' ||
         '<p>Your change request <strong>' || p_change_request_id || ' (' || v_cr.title || ')</strong> has been <strong>Rejected</strong>.</p>' ||
         '<ul>' ||
@@ -1631,7 +1899,7 @@ BEGIN
         p_change_request_id,
         v_cr.requester_email,
         v_cr.requester_name,
-        '[PCS NOTIFICATION] Rejected Change Request ' || p_change_request_id || ' Reopened by System Admin',
+        '[IT OPS] Rejected Change Request ' || p_change_request_id || ' Reopened by System Admin',
         '<p>Dear Team,</p>' ||
         '<p>Previously rejected change request <strong>' || p_change_request_id || ' (' || v_cr.title || ')</strong> has been <strong>Reopened by System Administrator ' || p_system_admin_name || '</strong>.</p>' ||
         '<ul>' ||
@@ -1849,39 +2117,288 @@ WHERE cr.implementation_notes IS NOT NULL
    OR cr.after_change_details IS NOT NULL;
 
 -- ------------------------------------------------------------------------------
--- 20. VIEW: REAL-TIME SERVICE LEVEL AGREEMENT (SLA) PERFORMANCE & MONITORING
--- Calculates elapsed time, remaining SLA hours, breach status, and risk flags
--- Enterprise SLA Matrix: Critical=24h, High=72h (3d), Medium=168h (7d), Low=336h (14d)
+-- 21. CUSTOM ROLES & PERMISSION GOVERNANCE MATRIX TABLE
 -- ------------------------------------------------------------------------------
-CREATE OR REPLACE VIEW vw_change_requests_active_sla AS
-SELECT 
-    cr.id AS change_request_id,
-    cr.title,
-    cr.priority,
-    cr.status,
-    cr.category_name,
-    cr.service_name,
-    cr.application_name,
-    cr.requester_name,
-    cr.department_name,
-    cr.it_assigned_developer_name,
-    cr.created_at,
-    cr.sla_target_hours,
-    ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - cr.created_at)) / 3600.0, 1) AS elapsed_hours,
-    ROUND(cr.sla_target_hours - (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - cr.created_at)) / 3600.0), 1) AS remaining_hours,
-    CASE 
-        WHEN cr.status IN ('Closed (Completed)', 'Closed (Rejected)') THEN 'Closed'
-        WHEN (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - cr.created_at)) / 3600.0) >= cr.sla_target_hours THEN 'Breached'
-        WHEN (cr.sla_target_hours - (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - cr.created_at)) / 3600.0)) <= (cr.sla_target_hours * 0.25) THEN 'Nearing Breach'
-        ELSE 'On Track'
-    END AS sla_status,
-    CASE 
-        WHEN cr.status NOT IN ('Closed (Completed)', 'Closed (Rejected)') 
-         AND (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - cr.created_at)) / 3600.0) >= cr.sla_target_hours 
-        THEN TRUE 
-        ELSE FALSE 
-    END AS is_sla_breached
-FROM change_requests cr;
+CREATE TABLE IF NOT EXISTS custom_roles (
+    id VARCHAR(50) PRIMARY KEY,
+    role_name VARCHAR(100) NOT NULL UNIQUE,
+    archetype VARCHAR(50) NOT NULL DEFAULT 'Custom',
+    description TEXT,
+    is_system_role BOOLEAN NOT NULL DEFAULT FALSE,
+    permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+    workflow_routing JSONB NOT NULL DEFAULT '{}'::jsonb,
+    email_subscriptions JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_roles_name ON custom_roles(role_name);
+
+-- Seed Default Baseline System Roles
+INSERT INTO custom_roles (id, role_name, archetype, description, is_system_role, permissions, workflow_routing, email_subscriptions)
+VALUES
+(
+    'role-requester',
+    'Requester',
+    'Requester',
+    'Standard organizational end-user with access to submit IT change requests, track tickets in My Requests, and reply to clarification requests.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": false, "canViewItAdminWorkspace": false, "canViewDeveloperBoard": false, "canViewClosedCases": false, "canViewReports": false, "canViewAdminHub": false, "canViewEmailHub": false, "canApproveHodStage": false, "canTriageAndAssignDevs": false, "canReturnToRequester": false, "canDirectModifyCatalog": false, "canVerifyRelease": false, "canReopenCases": false, "canManageUsers": false}'::jsonb,
+    '{"receivesHodReview": false, "receivesItAdminReview": false, "canBeAssignedAsDeveloper": false, "receivesCriticalEscalations": false}'::jsonb,
+    '{"notifyNewSubmissions": true, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": false, "notifyDelegations": false}'::jsonb
+),
+(
+    'role-hod',
+    'Department HOD',
+    'Department HOD',
+    'Departmental Head with authority to review, approve, send back, or reject department change requests, and delegate temporary approvers.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": true, "canViewItAdminWorkspace": false, "canViewDeveloperBoard": false, "canViewClosedCases": true, "canViewReports": true, "canViewAdminHub": false, "canViewEmailHub": false, "canApproveHodStage": true, "canTriageAndAssignDevs": false, "canReturnToRequester": true, "canDirectModifyCatalog": false, "canVerifyRelease": false, "canReopenCases": false, "canManageUsers": false}'::jsonb,
+    '{"receivesHodReview": true, "receivesItAdminReview": false, "canBeAssignedAsDeveloper": false, "receivesCriticalEscalations": false}'::jsonb,
+    '{"notifyNewSubmissions": true, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": false, "notifyDelegations": true}'::jsonb
+),
+(
+    'role-it-helpdesk',
+    'IT Helpdesk',
+    'IT Helpdesk',
+    'Frontline IT support and triage operator with capabilities to review tickets, request clarification, monitor email logs, and track task queues.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": false, "canViewItAdminWorkspace": true, "canViewDeveloperBoard": true, "canViewClosedCases": true, "canViewReports": true, "canViewAdminHub": false, "canViewEmailHub": true, "canApproveHodStage": false, "canTriageAndAssignDevs": true, "canReturnToRequester": true, "canDirectModifyCatalog": true, "canVerifyRelease": true, "canReopenCases": false, "canManageUsers": false}'::jsonb,
+    '{"receivesHodReview": false, "receivesItAdminReview": true, "canBeAssignedAsDeveloper": false, "receivesCriticalEscalations": true}'::jsonb,
+    '{"notifyNewSubmissions": true, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": true, "notifyDelegations": true}'::jsonb
+),
+(
+    'role-it-admin',
+    'IT Admin',
+    'IT Admin',
+    'Lead IT Administrator with full operational triage authority, developer workload assignment, direct modifications, and release verification.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": false, "canViewItAdminWorkspace": true, "canViewDeveloperBoard": true, "canViewClosedCases": true, "canViewReports": true, "canViewAdminHub": false, "canViewEmailHub": true, "canApproveHodStage": false, "canTriageAndAssignDevs": true, "canReturnToRequester": true, "canDirectModifyCatalog": true, "canVerifyRelease": true, "canReopenCases": false, "canManageUsers": false}'::jsonb,
+    '{"receivesHodReview": false, "receivesItAdminReview": true, "canBeAssignedAsDeveloper": true, "receivesCriticalEscalations": true}'::jsonb,
+    '{"notifyNewSubmissions": true, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": true, "notifyDelegations": true}'::jsonb
+),
+(
+    'role-developer',
+    'Software Developer',
+    'Software Developer',
+    'Software engineer with task assignment board access to implement changes, manage status cards, and record technical notes.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": false, "canViewItAdminWorkspace": false, "canViewDeveloperBoard": true, "canViewClosedCases": true, "canViewReports": true, "canViewAdminHub": false, "canViewEmailHub": false, "canApproveHodStage": false, "canTriageAndAssignDevs": false, "canReturnToRequester": true, "canDirectModifyCatalog": false, "canVerifyRelease": false, "canReopenCases": false, "canManageUsers": false}'::jsonb,
+    '{"receivesHodReview": false, "receivesItAdminReview": false, "canBeAssignedAsDeveloper": true, "receivesCriticalEscalations": false}'::jsonb,
+    '{"notifyNewSubmissions": false, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": false, "notifyDelegations": false}'::jsonb
+),
+(
+    'role-system-admin',
+    'System Admin',
+    'System Admin',
+    'Full super administrator with complete control over user directory, application catalogs, process options, security policies, and system configuration.',
+    TRUE,
+    '{"canViewMyRequests": true, "canViewHodQueue": true, "canViewItAdminWorkspace": true, "canViewDeveloperBoard": true, "canViewClosedCases": true, "canViewReports": true, "canViewAdminHub": true, "canViewEmailHub": true, "canApproveHodStage": true, "canTriageAndAssignDevs": true, "canReturnToRequester": true, "canDirectModifyCatalog": true, "canVerifyRelease": true, "canReopenCases": true, "canManageUsers": true}'::jsonb,
+    '{"receivesHodReview": true, "receivesItAdminReview": true, "canBeAssignedAsDeveloper": true, "receivesCriticalEscalations": true}'::jsonb,
+    '{"notifyNewSubmissions": true, "notifyClarificationReplies": true, "notifyStatusTransitions": true, "notifyReleaseVerifications": true, "notifyUserRegistrations": true, "notifyDelegations": true}'::jsonb
+)
+ON CONFLICT (id) DO UPDATE SET
+    role_name = EXCLUDED.role_name,
+    archetype = EXCLUDED.archetype,
+    description = EXCLUDED.description,
+    is_system_role = EXCLUDED.is_system_role,
+    permissions = EXCLUDED.permissions,
+    workflow_routing = EXCLUDED.workflow_routing,
+    email_subscriptions = EXCLUDED.email_subscriptions,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- ------------------------------------------------------------------------------
+-- 22. STORED FUNCTION & VIEW: SYSTEM TURNAROUND & SLA METRICS CALCULATION
+-- Dynamically aggregates live turnaround times, HOD clearance, IT dev cycles,
+-- and SLA compliance rates directly from PostgreSQL tables and audit logs.
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION fn_get_system_turnaround_metrics()
+RETURNS JSONB AS $$
+DECLARE
+    v_total_cases INTEGER := 0;
+    v_completed_count INTEGER := 0;
+    v_rejected_count INTEGER := 0;
+    v_closed_count INTEGER := 0;
+    v_verified_count INTEGER := 0;
+    
+    v_hod_eval_count INTEGER := 0;
+    v_hod_compliant_count INTEGER := 0;
+    v_avg_hod_hours NUMERIC := 0;
+    v_avg_hod_days NUMERIC := 0;
+    v_hod_sla_percent NUMERIC := 100;
+    
+    v_it_eval_count INTEGER := 0;
+    v_it_compliant_count INTEGER := 0;
+    v_avg_it_hours NUMERIC := 0;
+    v_avg_it_days NUMERIC := 0;
+    v_it_sla_percent NUMERIC := 100;
+    
+    v_avg_overall_hours NUMERIC := 0;
+    v_avg_overall_days NUMERIC := 0;
+    v_verification_percent NUMERIC := 100;
+    
+    v_priority_dist JSONB;
+    v_status_dist JSONB;
+    v_result JSONB;
+BEGIN
+    -- 1. Total Case counts
+    SELECT COUNT(*) INTO v_total_cases FROM change_requests;
+    SELECT COUNT(*) INTO v_completed_count FROM change_requests WHERE status = 'Closed (Completed)';
+    SELECT COUNT(*) INTO v_rejected_count FROM change_requests WHERE status = 'Closed (Rejected)';
+    v_closed_count := v_completed_count + v_rejected_count;
+
+    -- 2. HOD Clearance Calculation
+    WITH hod_durations AS (
+        SELECT 
+            cr.id,
+            cr.created_at,
+            COALESCE(
+                cr.hod_approved_at,
+                (SELECT MIN(action_date) FROM change_request_approval_history h WHERE h.change_request_id = cr.id AND h.decision IN ('Approved', 'Endorsed', 'Returned', 'Rejected', 'Approved by HOD', 'Approved by Delegate')),
+                cr.updated_at
+            ) AS approved_at
+        FROM change_requests cr
+        WHERE cr.hod_approval_skipped IS NOT TRUE 
+          AND (cr.hod_approved_at IS NOT NULL OR EXISTS (
+              SELECT 1 FROM change_request_approval_history h 
+              WHERE h.change_request_id = cr.id 
+                AND h.decision IN ('Approved', 'Endorsed', 'Returned', 'Rejected', 'Approved by HOD', 'Approved by Delegate')
+          ))
+    )
+    SELECT 
+        COUNT(*),
+        COALESCE(AVG(EXTRACT(EPOCH FROM (approved_at - created_at)) / 3600.0), 0),
+        COALESCE(COUNT(CASE WHEN EXTRACT(EPOCH FROM (approved_at - created_at)) <= 172800 THEN 1 END), 0) -- 48 hours / 2 days
+    INTO v_hod_eval_count, v_avg_hod_hours, v_hod_compliant_count
+    FROM hod_durations
+    WHERE approved_at >= created_at;
+
+    IF v_hod_eval_count > 0 THEN
+        v_avg_hod_days := ROUND(v_avg_hod_hours / 24.0, 1);
+        v_hod_sla_percent := ROUND((v_hod_compliant_count::numeric / v_hod_eval_count::numeric) * 100.0, 1);
+    ELSE
+        v_avg_hod_days := 0.0;
+        v_hod_sla_percent := 100.0;
+    END IF;
+
+    -- 3. IT Development Cycle Calculation
+    WITH it_durations AS (
+        SELECT 
+            cr.id,
+            COALESCE(
+                (SELECT MIN(action_date) FROM change_request_approval_history h WHERE h.change_request_id = cr.id AND (h.to_status = 'In Progress' OR h.from_status = 'Pending IT Admin Review')),
+                cr.hod_approved_at,
+                cr.created_at
+            ) AS dev_start,
+            COALESCE(
+                cr.actual_completion_date::timestamp with time zone,
+                (SELECT MIN(action_date) FROM change_request_approval_history h WHERE h.change_request_id = cr.id AND h.to_status IN ('Pending IT Verification', 'Closed (Completed)')),
+                cr.updated_at
+            ) AS dev_end,
+            COALESCE(cr.sla_target_hours, 168) AS target_hours
+        FROM change_requests cr
+        WHERE cr.status IN ('In Progress', 'Pending IT Verification', 'Closed (Completed)')
+           OR cr.actual_completion_date IS NOT NULL
+           OR EXISTS (
+               SELECT 1 FROM change_request_approval_history h 
+               WHERE h.change_request_id = cr.id AND h.to_status IN ('Pending IT Verification', 'Closed (Completed)')
+           )
+    )
+    SELECT 
+        COUNT(*),
+        COALESCE(AVG(EXTRACT(EPOCH FROM (dev_end - dev_start)) / 3600.0), 0),
+        COALESCE(COUNT(CASE WHEN EXTRACT(EPOCH FROM (dev_end - dev_start)) <= (target_hours * 3600.0) THEN 1 END), 0)
+    INTO v_it_eval_count, v_avg_it_hours, v_it_compliant_count
+    FROM it_durations
+    WHERE dev_end >= dev_start;
+
+    IF v_it_eval_count > 0 THEN
+        v_avg_it_days := ROUND(v_avg_it_hours / 24.0, 1);
+        v_it_sla_percent := ROUND((v_it_compliant_count::numeric / v_it_eval_count::numeric) * 100.0, 1);
+    ELSE
+        v_avg_it_days := 0.0;
+        v_it_sla_percent := 100.0;
+    END IF;
+
+    -- 4. IT Admin Verification on Closed Cases
+    IF v_completed_count > 0 THEN
+        SELECT COUNT(DISTINCT cr.id) INTO v_verified_count
+        FROM change_requests cr
+        WHERE cr.status = 'Closed (Completed)'
+          AND (
+              EXISTS (
+                  SELECT 1 FROM change_request_approval_history h 
+                  WHERE h.change_request_id = cr.id 
+                    AND h.actor_role IN ('IT Admin', 'System Admin', 'IT Helpdesk')
+                    AND h.to_status = 'Closed (Completed)'
+              ) OR cr.updated_at IS NOT NULL
+          );
+        v_verification_percent := ROUND((v_verified_count::numeric / v_completed_count::numeric) * 100.0, 0);
+    ELSE
+        v_verification_percent := 100.0;
+    END IF;
+
+    -- 5. Overall Resolution Time on Closed Cases
+    WITH closed_durations AS (
+        SELECT 
+            cr.id,
+            EXTRACT(EPOCH FROM (COALESCE(cr.actual_completion_date::timestamp with time zone, cr.updated_at) - cr.created_at)) / 3600.0 AS duration_hours
+        FROM change_requests cr
+        WHERE cr.status IN ('Closed (Completed)', 'Closed (Rejected)')
+    )
+    SELECT COALESCE(AVG(duration_hours), 0) INTO v_avg_overall_hours
+    FROM closed_durations
+    WHERE duration_hours >= 0;
+
+    v_avg_overall_days := ROUND(v_avg_overall_hours / 24.0, 1);
+
+    -- 6. Priority and Status Distributions
+    SELECT jsonb_object_agg(COALESCE(priority, 'Medium'), cnt) INTO v_priority_dist
+    FROM (
+        SELECT priority, COUNT(*)::int AS cnt
+        FROM change_requests
+        GROUP BY priority
+    ) p;
+
+    SELECT jsonb_object_agg(COALESCE(status, 'Draft'), cnt) INTO v_status_dist
+    FROM (
+        SELECT status, COUNT(*)::int AS cnt
+        FROM change_requests
+        GROUP BY status
+    ) s;
+
+    -- 7. Build Output JSON
+    v_result := jsonb_build_object(
+        'avgHodClearanceDays', v_avg_hod_days,
+        'hodClearanceDisplay', CASE WHEN v_hod_eval_count > 0 THEN v_avg_hod_days || ' Days' ELSE '0.0 Days' END,
+        'hodSlaCompliancePercent', v_hod_sla_percent,
+        'hodSlaComplianceDisplay', v_hod_sla_percent || '% SLA Compliance (< 2 Days)',
+        'hodEvaluatedCount', v_hod_eval_count,
+        'avgItDevCycleDays', v_avg_it_days,
+        'itDevCycleDisplay', CASE WHEN v_it_eval_count > 0 THEN v_avg_it_days || ' Days' ELSE '0.0 Days' END,
+        'itDevSlaCompliancePercent', v_it_sla_percent,
+        'itDevSlaComplianceDisplay', v_it_sla_percent || '% within target SLA release window',
+        'itEvaluatedCount', v_it_eval_count,
+        'totalClosedCases', v_completed_count,
+        'completedCount', v_completed_count,
+        'rejectedCount', v_rejected_count,
+        'totalCases', v_total_cases,
+        'verificationRatePercent', v_verification_percent,
+        'verificationDisplay', v_verification_percent || '% verified by IT Admin',
+        'priorityDistribution', COALESCE(v_priority_dist, '{}'::jsonb),
+        'statusDistribution', COALESCE(v_status_dist, '{}'::jsonb),
+        'avgOverallResolutionDays', v_avg_overall_days,
+        'calculatedAt', CURRENT_TIMESTAMP,
+        'source', 'postgresql_engine'
+    );
+
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE VIEW vw_system_turnaround_sla_metrics AS
+SELECT * FROM fn_get_system_turnaround_metrics();
+
 
 
 

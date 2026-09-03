@@ -6,6 +6,7 @@ import {
   HistoricalStaffWorkloadReportItem,
   getPriorityWorkloadPoints,
 } from '../utils/workloadScoring';
+import { isItUserOrDepartment, getEligibleDevelopers } from '../utils/rbac';
 import {
   BarChart3,
   Calendar,
@@ -47,7 +48,7 @@ export const StaffWorkloadReportView: React.FC<StaffWorkloadReportViewProps> = (
   // Selected staff filter for admin (allows admin to filter to specific staff or view all)
   const [adminStaffFilter, setAdminStaffFilter] = useState<string>('all');
 
-  // Filter staff to include Software Developers and any staff who have assignments
+  // Filter staff to include all IT Department personnel, IT Helpdesk, Developers, IT Admins, custom roles, and any staff with assignments
   const eligibleStaff = useMemo(() => {
     if (isStrictlyIndividual) {
       if (currentUser) {
@@ -56,11 +57,20 @@ export const StaffWorkloadReportView: React.FC<StaffWorkloadReportViewProps> = (
       return [];
     }
 
-    const devs = staffList.filter((u) => u.role === 'Software Developer' || u.role === 'IT Admin');
     const staffMap = new Map<string, UserProfile>();
-    devs.forEach((d) => staffMap.set(d.id, d));
 
-    // Also include any user who has received a case assignment
+    // 1. Add all users who are eligible IT staff (by department, role, or custom role)
+    const eligibleFromRbac = getEligibleDevelopers(staffList, []);
+    eligibleFromRbac.forEach((s) => staffMap.set(s.id, s));
+
+    // 2. Also check direct department or IT roles on staffList (e.g. IT Helpdesk, IT Support, IT Ops)
+    staffList.forEach((u) => {
+      if (isItUserOrDepartment(u)) {
+        staffMap.set(u.id, u);
+      }
+    });
+
+    // 3. Also include any user who has received a case assignment
     changeRequests.forEach((cr) => {
       if (cr.assignedDeveloperId && !staffMap.has(cr.assignedDeveloperId)) {
         const found = staffList.find((u) => u.id === cr.assignedDeveloperId);
@@ -74,7 +84,7 @@ export const StaffWorkloadReportView: React.FC<StaffWorkloadReportViewProps> = (
             username: cr.assignedDeveloperName.toLowerCase().replace(/\s+/g, '.'),
             departmentId: 8,
             departmentName: 'IT',
-            role: 'Software Developer',
+            role: 'IT Staff',
           });
         }
       }
@@ -634,13 +644,13 @@ export const StaffWorkloadReportView: React.FC<StaffWorkloadReportViewProps> = (
 
             {/* Staff Headcount */}
             <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2">
-              <span className="text-slate-500 font-medium block">Active Software Staff</span>
+              <span className="text-slate-500 font-medium block">Active IT & Technical Staff</span>
               <div>
                 <div className="flex items-baseline gap-1.5">
                   <span className="text-xl font-bold text-slate-900">{reportData.length}</span>
                   <span className="text-slate-500 font-medium text-xs">staff members</span>
                 </div>
-                <p className="text-[11px] text-slate-400 mt-1">Included in workload calculation</p>
+                <p className="text-[11px] text-slate-400 mt-1">IT department & assigned personnel</p>
               </div>
             </div>
           </div>

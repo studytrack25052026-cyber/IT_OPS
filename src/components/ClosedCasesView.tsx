@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { UserProfile, ChangeRequest } from '../types';
 import { calculateSlaStatus, getSlaBadgeClass } from '../utils/slaAndRisk';
+import { formatDisplayDate } from '../utils/timezone';
 import {
   Search,
   Filter,
@@ -262,8 +263,8 @@ export const ClosedCasesView: React.FC<ClosedCasesViewProps> = ({
                         </span>
                       </td>
 
-                      <td className="py-3 px-4 whitespace-nowrap text-[11px] text-slate-500 font-mono">
-                        {cr.actualCompletionDate || cr.updatedAt.split('T')[0]}
+                      <td className="py-3 px-4 whitespace-nowrap text-[11px] text-slate-500 font-medium">
+                        {formatDisplayDate(cr.actualCompletionDate || cr.updatedAt)}
                       </td>
 
                       <td className="py-3 px-4 text-right whitespace-nowrap">
