@@ -1,13 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import {
-  ChangeRequest,
-  UserProfile,
-  CustomRoleDefinition,
-  CategoryMaster,
-  ServiceMaster,
-  ApplicationAssetMaster,
-  IssueTypeMaster,
-} from '../types';
+import { ChangeRequest, UserProfile, CustomRoleDefinition } from '../types';
 import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass, getChaseStageInfo } from '../utils/slaAndRisk';
 import { formatDisplayDateTime, formatDisplayDate } from '../utils/timezone';
 import { hasRolePermission, getEligibleDevelopers } from '../utils/rbac';
@@ -69,10 +61,6 @@ interface RequestDetailModalProps {
   onReopenCase?: (crId: string, reopenComments: string) => void;
   onSendReminderNudge?: (crId: string, stage: 1 | 2 | 3, customNote?: string) => void;
   onAutoCloseInactive?: (crId: string, reason: string) => void;
-  categories?: CategoryMaster[];
-  services?: ServiceMaster[];
-  applications?: ApplicationAssetMaster[];
-  issueTypes?: IssueTypeMaster[];
 }
 
 export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
@@ -91,10 +79,6 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
   onReopenCase,
   onSendReminderNudge,
   onAutoCloseInactive,
-  categories,
-  services,
-  applications,
-  issueTypes,
 }) => {
   const developers = useMemo(() => {
     if (propDevelopers && propDevelopers.length > 0) return propDevelopers;
@@ -1081,10 +1065,6 @@ export const RequestDetailModal: React.FC<RequestDetailModalProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
-          categories={categories}
-          services={services}
-          applications={applications}
-          issueTypes={issueTypes}
           onSave={handleSaveItModify}
         />
       )}

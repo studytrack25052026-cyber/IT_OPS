@@ -1039,19 +1039,19 @@ export default function App() {
         slaTargetHours: getPrioritySlaHours(requestData.priority || 'Medium'),
         hodApprovalSkipped: !isDraft && isCritical,
         hodSkipReason: !isDraft && isCritical ? 'Critical Priority Direct-Route to IT Admin (Emergency)' : undefined,
-        categoryId: requestData.categoryId || categories[0]?.id || '',
-        categoryName: requestData.categoryName || requestData.category || categories[0]?.name || '',
-        category: requestData.category || requestData.categoryName || categories[0]?.name || '',
-        serviceId: requestData.serviceId || services[0]?.id || '',
-        serviceName: requestData.serviceName || requestData.subcategory || services[0]?.name || '',
-        subcategory: requestData.subcategory || requestData.serviceName || services[0]?.name || '',
-        applicationAssetId: requestData.applicationAssetId || applications[0]?.id || '',
-        applicationAssetName: requestData.applicationAssetName || requestData.applicationName || applications[0]?.name || '',
-        applicationName: requestData.applicationName || requestData.applicationAssetName || applications[0]?.name || '',
+        categoryId: requestData.categoryId || 'cat-biz-apps',
+        categoryName: requestData.categoryName || requestData.category || 'Business Applications',
+        category: requestData.category || 'Business Applications',
+        serviceId: requestData.serviceId || 'srv-biz-prod',
+        serviceName: requestData.serviceName || requestData.subcategory || 'Production System',
+        subcategory: requestData.subcategory || 'Production System',
+        applicationAssetId: requestData.applicationAssetId || 'app-pcs-net',
+        applicationAssetName: requestData.applicationAssetName || requestData.applicationName || 'PCS.NET',
+        applicationName: requestData.applicationName || 'PCS.NET',
         assetTag: requestData.assetTag,
-        issueTypeId: requestData.issueTypeId || issueTypes[0]?.id || '',
-        issueTypeName: requestData.issueTypeName || requestData.issueType || issueTypes[0]?.name || '',
-        issueType: requestData.issueType || requestData.issueTypeName || issueTypes[0]?.name || '',
+        issueTypeId: requestData.issueTypeId || 'issue-incident',
+        issueTypeName: requestData.issueTypeName || requestData.issueType || 'Incident',
+        issueType: requestData.issueType || 'Incident',
         applicationAreas: requestData.applicationAreas || [],
         affectedModules: requestData.affectedModules || [],
         currentBehaviorDescription: requestData.currentBehaviorDescription || '',
@@ -2581,10 +2581,6 @@ export default function App() {
               onItDirectModify={handleItDirectModify}
               onRejectCase={handleRejectCase}
               onRequestClick={handleOpenDetailModal}
-              categories={categories}
-              services={services}
-              applications={applications}
-              issueTypes={issueTypes}
             />
           )}
 
@@ -2599,10 +2595,6 @@ export default function App() {
               onItDirectModify={handleItDirectModify}
               onRejectCase={handleRejectCase}
               onRequestClick={handleOpenDetailModal}
-              categories={categories}
-              services={services}
-              applications={applications}
-              issueTypes={issueTypes}
             />
           )}
 
@@ -2696,10 +2688,6 @@ export default function App() {
           users={users}
           customRoles={customRoles}
           changeRequests={changeRequests}
-          categories={categories}
-          services={services}
-          applications={applications}
-          issueTypes={issueTypes}
           onEditRequest={(cr) => {
             setSelectedCrForModal(null);
             setEditingCr(cr);

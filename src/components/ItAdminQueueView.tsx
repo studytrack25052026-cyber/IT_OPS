@@ -1,14 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import {
-  UserProfile,
-  ChangeRequest,
-  UserProfile as UserType,
-  CustomRoleDefinition,
-  CategoryMaster,
-  ServiceMaster,
-  ApplicationAssetMaster,
-  IssueTypeMaster,
-} from '../types';
+import { UserProfile, ChangeRequest, UserProfile as UserType, CustomRoleDefinition } from '../types';
 import { mockUsers, mockModules } from '../data/db';
 import { calculateSlaStatus, getSlaBadgeClass, getRiskBadgeClass } from '../utils/slaAndRisk';
 import { formatDisplayDate } from '../utils/timezone';
@@ -51,10 +42,6 @@ interface ItAdminQueueViewProps {
   onItDirectModify?: (payload: ItDirectModifyPayload) => void;
   onRejectCase?: (crId: string, rejectionReason: string) => void;
   onRequestClick: (crId: string) => void;
-  categories?: CategoryMaster[];
-  services?: ServiceMaster[];
-  applications?: ApplicationAssetMaster[];
-  issueTypes?: IssueTypeMaster[];
 }
 
 export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
@@ -68,10 +55,6 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
   onItDirectModify,
   onRejectCase,
   onRequestClick,
-  categories,
-  services,
-  applications,
-  issueTypes,
 }) => {
   const [activeTab, setActiveTab] = useState<'review' | 'verification' | 'masterdata'>('review');
   const [selectedCrId, setSelectedCrId] = useState<string | null>(null);
@@ -1055,10 +1038,6 @@ export const ItAdminQueueView: React.FC<ItAdminQueueViewProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
-          categories={categories}
-          services={services}
-          applications={applications}
-          issueTypes={issueTypes}
           onSave={(payload) => {
             onItDirectModify(payload);
             setShowDirectModifyModal(false);

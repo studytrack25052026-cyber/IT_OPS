@@ -1,14 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import {
-  UserProfile,
-  ChangeRequest,
-  RequestStatus,
-  CustomRoleDefinition,
-  CategoryMaster,
-  ServiceMaster,
-  ApplicationAssetMaster,
-  IssueTypeMaster,
-} from '../types';
+import { UserProfile, ChangeRequest, RequestStatus, CustomRoleDefinition } from '../types';
 import { calculateRiskScore, getRiskBadgeClass } from '../utils/slaAndRisk';
 import { getPriorityWorkloadPoints } from '../utils/workloadScoring';
 import { formatDisplayDate } from '../utils/timezone';
@@ -67,10 +58,6 @@ interface DeveloperKanbanViewProps {
   onItDirectModify?: (payload: ItDirectModifyPayload) => void;
   onRejectCase?: (crId: string, rejectionReason: string) => void;
   onRequestClick: (crId: string) => void;
-  categories?: CategoryMaster[];
-  services?: ServiceMaster[];
-  applications?: ApplicationAssetMaster[];
-  issueTypes?: IssueTypeMaster[];
 }
 
 export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
@@ -83,10 +70,6 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
   onItDirectModify,
   onRejectCase,
   onRequestClick,
-  categories,
-  services,
-  applications,
-  issueTypes,
 }) => {
   const [selectedCr, setSelectedCr] = useState<ChangeRequest | null>(null);
   const [targetStatus, setTargetStatus] = useState<RequestStatus>('In Progress');
@@ -988,10 +971,6 @@ export const DeveloperKanbanView: React.FC<DeveloperKanbanViewProps> = ({
           currentUser={currentUser}
           developers={developers}
           changeRequests={changeRequests}
-          categories={categories}
-          services={services}
-          applications={applications}
-          issueTypes={issueTypes}
           onSave={(payload) => {
             onItDirectModify(payload);
             setShowDirectModifyModal(false);

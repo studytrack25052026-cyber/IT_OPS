@@ -17,7 +17,7 @@ import {
   EmailNotificationLog,
   CustomRoleDefinition,
 } from '../types';
-import { mockUsers, mockDepartments, ModuleHierarchyMap, defaultStorageConfig, defaultSmtpConfig, baselineCustomRoles } from '../data/db';
+import { mockUsers, mockDepartments, defaultModuleHierarchy, ModuleHierarchyMap, defaultStorageConfig, defaultSmtpConfig, baselineCustomRoles } from '../data/db';
 import { validatePasswordPolicy, generateCompliantPassword } from '../utils/passwordPolicy';
 import { getMalaysianTimestamp, formatDisplayDateTime } from '../utils/timezone';
 import { api } from '../services/api';

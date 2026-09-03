@@ -18,6 +18,15 @@ import {
   ApplicationSubFunctionMaster,
   ApplicationProcessMaster,
 } from '../types';
+import {
+  MASTER_CATEGORIES,
+  MASTER_SERVICES,
+  MASTER_APPLICATIONS_ASSETS,
+  MASTER_ISSUE_TYPES,
+  MASTER_APPLICATION_MODULES,
+  MASTER_APPLICATION_SUBFUNCTIONS,
+  MASTER_APPLICATION_PROCESSES,
+} from '../data/serviceCatalog';
 import { calculateRiskScore } from '../utils/slaAndRisk';
 import { getMalaysianTimestamp } from '../utils/timezone';
 import {
@@ -82,22 +91,13 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
   subFunctions: propSubFunctions,
   processes: propProcesses,
 }) => {
-  // Dynamic Catalog Resolution
-  const getCached = <T,>(key: string): T[] => {
-    try {
-      const v = localStorage.getItem(key);
-      if (v) return JSON.parse(v);
-    } catch {}
-    return [];
-  };
-
-  const allCategories = propCategories && propCategories.length > 0 ? propCategories : getCached<CategoryMaster>('pcs_catalog_cats_v1');
-  const allServices = propServices && propServices.length > 0 ? propServices : getCached<ServiceMaster>('pcs_catalog_services_v1');
-  const allApplications = propApplications && propApplications.length > 0 ? propApplications : getCached<ApplicationAssetMaster>('pcs_catalog_apps_v1');
-  const allIssueTypes = propIssueTypes && propIssueTypes.length > 0 ? propIssueTypes : getCached<IssueTypeMaster>('pcs_catalog_issuetypes_v1');
-  const allModules = propModules && propModules.length > 0 ? propModules : getCached<ApplicationModuleMaster>('pcs_catalog_modules_v1');
-  const allSubFunctions = propSubFunctions && propSubFunctions.length > 0 ? propSubFunctions : getCached<ApplicationSubFunctionMaster>('pcs_catalog_subfunctions_v1');
-  const allProcesses = propProcesses && propProcesses.length > 0 ? propProcesses : getCached<ApplicationProcessMaster>('pcs_catalog_processes_v1');
+  const allCategories = propCategories && propCategories.length > 0 ? propCategories : MASTER_CATEGORIES;
+  const allServices = propServices && propServices.length > 0 ? propServices : MASTER_SERVICES;
+  const allApplications = propApplications && propApplications.length > 0 ? propApplications : MASTER_APPLICATIONS_ASSETS;
+  const allIssueTypes = propIssueTypes && propIssueTypes.length > 0 ? propIssueTypes : MASTER_ISSUE_TYPES;
+  const allModules = propModules && propModules.length > 0 ? propModules : MASTER_APPLICATION_MODULES;
+  const allSubFunctions = propSubFunctions && propSubFunctions.length > 0 ? propSubFunctions : MASTER_APPLICATION_SUBFUNCTIONS;
+  const allProcesses = propProcesses && propProcesses.length > 0 ? propProcesses : MASTER_APPLICATION_PROCESSES;
 
   // Target Department HOD info
   const targetDept = (departments || []).find((d) => d.id === currentUser.departmentId);
@@ -113,21 +113,22 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allCategories.find((c) => c.name === initialData.category);
       if (match) return match.id;
     }
-    return allCategories[0]?.id || '';
+    return allCategories[0]?.id || 'cat-biz-apps'; // Default: Business Applications
   });
 
   const currentCategory = useMemo(() => {
     return (
       allCategories.find((c) => c.id === selectedCategoryId) ||
       allCategories[0] ||
-      null
+      MASTER_CATEGORIES[0] ||
+      { id: 'cat-biz-apps', name: 'Business Applications', code: 'BIZ_APPS', isActive: true }
     );
   }, [allCategories, selectedCategoryId]);
 
   // Available Services for Selected Category
   const availableServices = useMemo(() => {
-    if (!selectedCategoryId) return [];
-    return allServices.filter((s) => s.categoryId === selectedCategoryId && s.isActive);
+    const srvs = allServices.filter((s) => s.categoryId === selectedCategoryId && s.isActive);
+    return srvs.length > 0 ? srvs : allServices.slice(0, 1);
   }, [allServices, selectedCategoryId]);
 
   const [selectedServiceId, setSelectedServiceId] = useState<string>(() => {
@@ -136,15 +137,13 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allServices.find((s) => s.name === initialData.subcategory);
       if (match) return match.id;
     }
-    return availableServices[0]?.id || '';
+    return availableServices[0]?.id || 'srv-biz-prod'; // Default: Production System
   });
 
   // Ensure selected service belongs to selected category
   useEffect(() => {
     if (availableServices.length > 0 && !availableServices.some((s) => s.id === selectedServiceId)) {
       setSelectedServiceId(availableServices[0].id);
-    } else if (availableServices.length === 0) {
-      setSelectedServiceId('');
     }
   }, [availableServices, selectedServiceId]);
 
@@ -152,16 +151,19 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
     return (
       availableServices.find((s) => s.id === selectedServiceId) ||
       availableServices[0] ||
-      null
+      allServices[0] ||
+      MASTER_SERVICES[0] ||
+      { id: 'srv-biz-prod', name: 'Production System', code: 'PROD_SYS', categoryId: currentCategory?.id || 'cat-biz-apps', isActive: true }
     );
-  }, [availableServices, selectedServiceId]);
+  }, [availableServices, selectedServiceId, allServices, currentCategory]);
 
   // Available Applications / IT Assets for Selected Service
   const availableApplicationsAssets = useMemo(() => {
     if (!currentService) return [];
-    return allApplications.filter(
+    const apps = allApplications.filter(
       (a) => a.serviceId === currentService.id && a.isActive
     );
+    return apps.length > 0 ? apps : allApplications.slice(0, 1);
   }, [allApplications, currentService]);
 
   const [selectedAppAssetId, setSelectedAppAssetId] = useState<string>(() => {
@@ -172,14 +174,12 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       );
       if (match) return match.id;
     }
-    return availableApplicationsAssets[0]?.id || '';
+    return availableApplicationsAssets[0]?.id || 'app-pcs-net'; // Default: PCS.NET
   });
 
   useEffect(() => {
     if (availableApplicationsAssets.length > 0 && !availableApplicationsAssets.some((a) => a.id === selectedAppAssetId)) {
       setSelectedAppAssetId(availableApplicationsAssets[0].id);
-    } else if (availableApplicationsAssets.length === 0) {
-      setSelectedAppAssetId('');
     }
   }, [availableApplicationsAssets, selectedAppAssetId]);
 
@@ -187,9 +187,11 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
     return (
       availableApplicationsAssets.find((a) => a.id === selectedAppAssetId) ||
       availableApplicationsAssets[0] ||
-      null
+      allApplications[0] ||
+      MASTER_APPLICATIONS_ASSETS[0] ||
+      { id: 'app-pcs-net', name: 'PCS.NET', code: 'PCS_NET', serviceId: currentService?.id || 'srv-biz-prod', assetTag: 'SRV-PCS-01', hasApplicationArea: true, isActive: true }
     );
-  }, [availableApplicationsAssets, selectedAppAssetId]);
+  }, [availableApplicationsAssets, selectedAppAssetId, allApplications, currentService]);
 
   // Issue Type Selection
   const [selectedIssueTypeId, setSelectedIssueTypeId] = useState<string>(() => {
@@ -198,28 +200,16 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       const match = allIssueTypes.find((i) => i.name === initialData.issueType);
       if (match) return match.id;
     }
-    return allIssueTypes[0]?.id || '';
+    return allIssueTypes[0]?.id || 'issue-incident';
   });
 
   const currentIssueType = useMemo(() => {
     return (
       allIssueTypes.find((i) => i.id === selectedIssueTypeId) ||
       allIssueTypes[0] ||
-      null
+      MASTER_ISSUE_TYPES[0] ||
+      { id: 'issue-incident', name: 'Incident / Bug', code: 'INCIDENT', isActive: true }
     );
-  }, [allIssueTypes, selectedIssueTypeId]);
-
-  // Synchronize initial selections if data loads asynchronously
-  useEffect(() => {
-    if (!selectedCategoryId && allCategories.length > 0) {
-      setSelectedCategoryId(allCategories[0].id);
-    }
-  }, [allCategories, selectedCategoryId]);
-
-  useEffect(() => {
-    if (!selectedIssueTypeId && allIssueTypes.length > 0) {
-      setSelectedIssueTypeId(allIssueTypes[0].id);
-    }
   }, [allIssueTypes, selectedIssueTypeId]);
 
   // --------------------------------------------------------------------------
@@ -472,10 +462,7 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
         affectedModulesList.push(tag);
       });
     } else {
-      const parts = [currentCategory?.name, currentService?.name, currentAppAsset?.name].filter(Boolean);
-      if (parts.length > 0) {
-        affectedModulesList.push(parts.join(' > '));
-      }
+      affectedModulesList.push(`${currentCategory.name} > ${currentService.name} > ${currentAppAsset.name}`);
     }
 
     const payload: Partial<ChangeRequest> = {
@@ -488,20 +475,20 @@ export const ChangeRequestForm: React.FC<ChangeRequestFormProps> = ({
       departmentName: currentUser.departmentName,
 
       // Unified Relational Classification fields
-      categoryId: currentCategory?.id || selectedCategoryId,
-      categoryName: currentCategory?.name || '',
-      category: (currentCategory?.name as TicketCategory) || 'Business Applications',
-      serviceId: currentService?.id || selectedServiceId,
-      serviceName: currentService?.name || '',
-      subcategory: currentService?.name || '',
-      applicationAssetId: currentAppAsset?.id || selectedAppAssetId,
-      applicationAssetName: currentAppAsset?.name || '',
-      applicationName: currentAppAsset?.name || '',
-      assetTag: currentAppAsset?.assetTag,
-      issueTypeId: currentIssueType?.id || selectedIssueTypeId,
-      issueTypeName: currentIssueType?.name || '',
-      issueType: (currentIssueType?.name as TicketIssueType) || 'Incident',
-      requestType: (currentIssueType?.name as RequestType) || 'Incident',
+      categoryId: currentCategory.id,
+      categoryName: currentCategory.name,
+      category: currentCategory.name,
+      serviceId: currentService.id,
+      serviceName: currentService.name,
+      subcategory: currentService.name,
+      applicationAssetId: currentAppAsset.id,
+      applicationAssetName: currentAppAsset.name,
+      applicationName: currentAppAsset.name,
+      assetTag: currentAppAsset.assetTag,
+      issueTypeId: currentIssueType.id,
+      issueTypeName: currentIssueType.name,
+      issueType: currentIssueType.name,
+      requestType: (currentIssueType.name as RequestType) || 'Incident',
 
       // Application Areas
       applicationAreas,

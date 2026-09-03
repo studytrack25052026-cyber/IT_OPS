@@ -441,6 +441,7 @@ async function ensureDatabaseSchema(pool: Pool): Promise<void> {
       CREATE TABLE IF NOT EXISTS application_subfunctions (
         id VARCHAR(100) PRIMARY KEY,
         module_id VARCHAR(100) NOT NULL,
+        module_code VARCHAR(100),
         code VARCHAR(100),
         name VARCHAR(150) NOT NULL,
         description TEXT,
@@ -849,9 +850,9 @@ async function ensureProductionBaseline(pool: Pool, force: boolean = false): Pro
         }
         for (const sf of MASTER_APPLICATION_SUBFUNCTIONS) {
           await pool.query(
-            `INSERT INTO application_subfunctions (id, module_id, code, name, description, display_order, is_active)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`,
-            [sf.id, sf.moduleId, sf.code, sf.name, sf.description || '', sf.displayOrder, sf.isActive]
+            `INSERT INTO application_subfunctions (id, module_id, module_code, code, name, description, display_order, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING`,
+            [sf.id, sf.moduleId, sf.moduleCode || '', sf.code, sf.name, sf.description || '', sf.displayOrder, sf.isActive]
           );
         }
         for (const proc of MASTER_APPLICATION_PROCESSES) {
@@ -3129,19 +3130,16 @@ app.get('/api/catalog', async (req, res) => {
       isActive: r.is_active !== false,
     }));
 
-    const subFunctions = sfsRes.rows.map((r) => {
-      const parentMod = modules.find((m) => m.id === r.module_id);
-      return {
-        id: r.id,
-        moduleId: r.module_id,
-        moduleCode: parentMod?.code || '',
-        code: r.code,
-        name: r.name,
-        description: r.description || '',
-        displayOrder: r.display_order || 1,
-        isActive: r.is_active !== false,
-      };
-    });
+    const subFunctions = sfsRes.rows.map((r) => ({
+      id: r.id,
+      moduleId: r.module_id,
+      moduleCode: r.module_code || '',
+      code: r.code,
+      name: r.name,
+      description: r.description || '',
+      displayOrder: r.display_order || 1,
+      isActive: r.is_active !== false,
+    }));
 
     const processes = procsRes.rows.map((r) => ({
       id: r.id,
@@ -3381,17 +3379,18 @@ app.post('/api/catalog/save', async (req, res) => {
       if (Array.isArray(subFunctions)) {
         for (const sf of subFunctions) {
           await client.query(
-            `INSERT INTO application_subfunctions (id, module_id, code, name, description, display_order, is_active, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+            `INSERT INTO application_subfunctions (id, module_id, module_code, code, name, description, display_order, is_active, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
              ON CONFLICT (id) DO UPDATE SET
                module_id = EXCLUDED.module_id,
+               module_code = EXCLUDED.module_code,
                code = EXCLUDED.code,
                name = EXCLUDED.name,
                description = EXCLUDED.description,
                display_order = EXCLUDED.display_order,
                is_active = EXCLUDED.is_active,
                updated_at = CURRENT_TIMESTAMP`,
-            [sf.id, sf.moduleId, sf.code, sf.name, sf.description || '', sf.displayOrder || 1, sf.isActive !== false]
+            [sf.id, sf.moduleId, sf.moduleCode || '', sf.code, sf.name, sf.description || '', sf.displayOrder || 1, sf.isActive !== false]
           );
         }
       }
